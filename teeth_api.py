@@ -1,68 +1,79 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 import cv2
 import numpy as np
+import mediapipe as mp
 import tempfile
-import os
 
 app = Flask(__name__)
-CORS(app)  # ļauj frontendam no jebkuras lapas sūtīt pieprasījumus
+CORS(app)
 
-# Maksimālais faila izmērs – 5 MB
-app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
+mp_face_mesh = mp.solutions.face_mesh
 
-@app.route("/")
+@app.route('/')
 def home():
-    return jsonify({"status": "🦷 Teeth Whitening API is live!"})
+    return jsonify({"status": "Smart Teeth Whitening API 😁 is live!"})
 
-@app.route("/whiten", methods=["POST"])
+@app.route('/whiten', methods=['POST'])
 def whiten():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "Empty filename"}), 400
+
     try:
-        if "file" not in request.files:
-            return jsonify({"error": "Nav atrasts fails"}), 400
+        file_bytes = np.frombuffer(file.read(), np.uint8)
+        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        file = request.files["file"]
+        # Mediapipe sejas punkts analīze
+        with mp_face_mesh.FaceMesh(
+            static_image_mode=True,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5
+        ) as face_mesh:
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-            file.save(tmp.name)
-            image_path = tmp.name
+            results = face_mesh.process(img_rgb)
+            if not results.multi_face_landmarks:
+                return jsonify({"error": "No face detected"}), 400
 
-        image = cv2.imread(image_path)
-        if image is None:
-            return jsonify({"error": "Nederīgs attēla formāts"}), 400
+            h, w, _ = img.shape
+            mask = np.zeros((h, w), dtype=np.uint8)
 
-        # Samazina lielas bildes
-        if image.shape[1] > 800:
-            ratio = 800 / image.shape[1]
-            new_size = (800, int(image.shape[0] * ratio))
-            image = cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
+            # paņemam mutes punktus (ap 78–88 + 308–318)
+            mouth_indices = list(range(78, 89)) + list(range(308, 319))
+            for face_landmarks in results.multi_face_landmarks:
+                points = [(int(face_landmarks.landmark[i].x * w),
+                           int(face_landmarks.landmark[i].y * h)) for i in mouth_indices]
+                points = np.array(points, dtype=np.int32)
+                cv2.fillPoly(mask, [points], 255)
 
-        # Pielieto vienkāršu gaišināšanas efektu
-        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        cl = clahe.apply(l)
-        merged = cv2.merge((cl, a, b))
-        whitened = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+            # nedaudz paplašinām masku
+            mask = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=2)
+            mask = cv2.GaussianBlur(mask, (9, 9), 0)
 
-        result_path = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg").name
-        cv2.imwrite(result_path, whitened)
+            # kopējam tikai zobu reģionu
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            h_ch, s_ch, v_ch = cv2.split(hsv)
 
-        return send_file(result_path, mimetype="image/jpeg")
+            # palielinām gaišumu tikai zobu reģionā
+            v_ch = np.where(mask > 0, np.clip(v_ch * 1.5, 0, 255), v_ch)
+            s_ch = np.where(mask > 0, np.clip(s_ch * 0.6, 0, 255), s_ch)
+
+            whitened_hsv = cv2.merge([h_ch, s_ch.astype(np.uint8), v_ch.astype(np.uint8)])
+            whitened = cv2.cvtColor(whitened_hsv, cv2.COLOR_HSV2BGR)
+
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+            cv2.imwrite(temp_file.name, whitened)
+
+            return send_file(temp_file.name, mimetype='image/jpeg')
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-    finally:
-        try:
-            if "image_path" in locals() and os.path.exists(image_path):
-                os.remove(image_path)
-            if "result_path" in locals() and os.path.exists(result_path):
-                os.remove(result_path)
-        except Exception:
-            pass
 
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
