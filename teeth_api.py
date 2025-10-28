@@ -1,88 +1,72 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_file
 import cv2
 import numpy as np
+import tempfile
 import os
-import base64
-from datetime import datetime
 
-# ===============================
-# Flask inicializācija
-# ===============================
 app = Flask(__name__)
 
-UPLOAD_FOLDER = "uploads"
-OUTPUT_FOLDER = "outputs"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+# Maksimālais faila izmērs – 5 MB
+app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
 
-
-# ===============================
-# Sākuma lapa (statuss)
-# ===============================
 @app.route("/")
 def home():
-    return "Teeth Whitening API is live! 😁"
+    return jsonify({"status": "🦷 Teeth Whitening API is live!"})
 
-
-# ===============================
-# Attēla apstrāde un balināšana
-# ===============================
 @app.route("/whiten", methods=["POST"])
 def whiten():
-    if "file" not in request.files:
-        return jsonify({"error": "No file provided"}), 400
+    try:
+        # Pārbauda vai ir fails
+        if "file" not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
 
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"error": "Empty filename"}), 400
+        file = request.files["file"]
 
-    # Saglabā augšupielādēto attēlu
-    filename = datetime.now().strftime("%Y%m%d%H%M%S") + ".png"
-    input_path = os.path.join(UPLOAD_FOLDER, filename)
-    output_path = os.path.join(OUTPUT_FOLDER, filename)
-    file.save(input_path)
+        # Pagaidu faila glabāšana
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+            file.save(tmp.name)
+            image_path = tmp.name
 
-    # Nolasām attēlu ar OpenCV
-    image = cv2.imread(input_path)
-    if image is None:
-        return jsonify({"error": "Invalid image"}), 400
+        # Nolasām attēlu ar OpenCV
+        image = cv2.imread(image_path)
+        if image is None:
+            return jsonify({"error": "Invalid image format"}), 400
 
-    # === Zobu balināšanas efekts (vienkāršots) ===
-    # Pārvērš LAB krāsu telpā un uzlabo gaišumu
-    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    l = cv2.equalizeHist(l)
-    lab = cv2.merge((l, a, b))
-    whitened = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        # Samazina lielas bildes (max 800px platums)
+        if image.shape[1] > 800:
+            ratio = 800 / image.shape[1]
+            new_size = (800, int(image.shape[0] * ratio))
+            image = cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
 
-    # Neliels kontrasta un gaišuma pieaugums
-    alpha = 1.15  # kontrasts
-    beta = 15     # gaišums
-    whitened = cv2.convertScaleAbs(whitened, alpha=alpha, beta=beta)
+        # Konvertē uz LAB krāsu telpu
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
 
-    # Saglabā un konvertē base64 formātā
-    cv2.imwrite(output_path, whitened)
-    with open(output_path, "rb") as f:
-        encoded = base64.b64encode(f.read()).decode("utf-8")
+        # Palielina gaišumu (zobu balināšana simulācija)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        cl = clahe.apply(l)
+        merged = cv2.merge((cl, a, b))
+        whitened = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
 
-    # Atgriež JSON ar base64
-    return jsonify({
-        "message": "success",
-        "image": encoded,
-        "output_url": f"https://{request.host}/static/{filename}"
-    })
+        # Saglabā rezultātu
+        result_path = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg").name
+        cv2.imwrite(result_path, whitened)
 
+        return send_file(result_path, mimetype="image/jpeg")
 
-# ===============================
-# Statisko failu piegāde
-# ===============================
-@app.route("/static/<path:filename>")
-def serve_static(filename):
-    return send_from_directory(OUTPUT_FOLDER, filename)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
+    finally:
+        # Notīra pagaidu failus
+        try:
+            if os.path.exists(image_path):
+                os.remove(image_path)
+            if "result_path" in locals() and os.path.exists(result_path):
+                os.remove(result_path)
+        except Exception:
+            pass
 
-# ===============================
-# Debug režīma palaišana (lokāli)
-# ===============================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
