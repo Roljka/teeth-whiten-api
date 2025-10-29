@@ -9,7 +9,7 @@ CORS(app)
 
 @app.route("/")
 def home():
-    return jsonify({"message": "Teeth Whitening API v6 😁"})
+    return jsonify({"message": "Teeth Whitening API v7 🦷"})
 
 @app.route("/whiten", methods=["POST"])
 def whiten():
@@ -19,6 +19,7 @@ def whiten():
     file = request.files["file"]
     intensity = int(request.form.get("intensity", 25))  # 10–50
 
+    # Saglabā pagaidu failu
     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
         file.save(tmp.name)
         img = cv2.imread(tmp.name)
@@ -26,21 +27,23 @@ def whiten():
     if img is None:
         return jsonify({"error": "Nevar nolasīt attēlu"}), 400
 
-    # pārvērš LAB krāstelpā (L = gaišums)
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
+    # Konvertē uz HSV krāstelpu
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    # izveido masku gaišajiem, dzeltenīgiem reģioniem (zobi)
-    mask = cv2.inRange(lab, (150, 120, 120), (255, 145, 160))
-    mask = cv2.GaussianBlur(mask, (25, 25), 10)
+    # Zobi = gaiši pikseļi ar zemu piesātinājumu (S)
+    lower = np.array([0, 0, 160])     # apakšējais slieksnis (tumšākais tonis)
+    upper = np.array([180, 60, 255])  # augšējais slieksnis (baltie reģioni)
+    mask = cv2.inRange(hsv, lower, upper)
 
-    # palielina gaišumu tikai zobiem
-    l = cv2.add(l, intensity, mask=mask)
-    lab = cv2.merge((l, a, b))
-    whitened = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    # Izpludina malu, lai maska būtu gluda
+    mask = cv2.GaussianBlur(mask, (15, 15), 5)
 
-    out_path = os.path.join(tempfile.gettempdir(), "whitened_v6.jpg")
-    cv2.imwrite(out_path, whitened)
+    # Balina tikai ar masku nosegtās vietas
+    img_whitened = img.copy()
+    img_whitened[mask > 0] = cv2.add(img[mask > 0], (intensity, intensity, intensity))
+
+    out_path = os.path.join(tempfile.gettempdir(), "whitened_v7.jpg")
+    cv2.imwrite(out_path, img_whitened)
     return send_file(out_path, mimetype="image/jpeg")
 
 if __name__ == "__main__":
