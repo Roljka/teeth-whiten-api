@@ -4,4 +4,5 @@ opencv-python-headless==4.9.0.80
 Pillow==10.3.0
 transformers==4.44.0
 torch==2.2.2
+numpy<2.0.0
 gunicorn==23.0.0
