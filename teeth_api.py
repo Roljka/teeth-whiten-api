@@ -1,23 +1,20 @@
 # teeth_api.py
-import io
-import os
+import io, os
 import numpy as np
 import cv2
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 
-# ---- Tweakable params ----
-L_MIN = 60          # LAB L* min  (60–65 parasti labi)
-A_MAX = 10          # LAB a* max  (maz reds)
-B_MAX = 18          # LAB b* max  (maz yellows)
-SAT_MAX = 90        # HSV S max   (zemāka piesāt., lai ignorē lūpu rozā)
-WHITEN_BOOST = 22   # cik daudz pacelt L* (10–30)
-L_CAP = 92          # balināšanas griesti (90–94 izskatās naturāli)
-FEATHER_PX = 6      # maskas mīkstā mala pikseļos
+# ---------------- Tunējami griesti ----------------
+TARGET_L = 94.0   # cik gaiši maksimāli drīkst būt zobi (LAB L*)
+FEATHER = 6       # maskas "mīkstā mala" pikseļos
+KEEP_COMPONENTS = 2  # cik lielus savienotos laukumus paturam (augšējais+apakšējais zobu loks)
 
-# ---- MediaPipe FaceMesh (lazy init, single instance) ----
+# ---------------- MediaPipe init (lazy) ----------------
 _mp = None
 _facemesh = None
+OUTER_IDX = [61,146,91,181,84,17,314,405,321,375,291,308]
+INNER_IDX = [78,95,88,178,87,14,317,402,318,324,308,415]
 
 def get_facemesh():
     global _mp, _facemesh
@@ -27,134 +24,156 @@ def get_facemesh():
         _facemesh = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=True,
             max_num_faces=1,
-            refine_landmarks=True,        # dod precīzākas lūpas
+            refine_landmarks=True,
             min_detection_confidence=0.5
         )
     return _mp, _facemesh
 
-# Lūpu landmarķu indeksi (MediaPipe FaceMesh)
-# Outer lips aptuvenie punkti:
-OUTER_IDX = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 308]
-# Inner lips (mutas atvērums) – tieši “zobu logam”
-INNER_IDX = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415]
-
-app = Flask(__name__)
-CORS(app)
-
-def landmarks_to_polygon(landmarks, idxs, w, h):
-    pts = []
-    for i in idxs:
-        p = landmarks[i]
-        pts.append((int(p.x * w), int(p.y * h)))
+def landmarks_to_polygon(lms, idxs, w, h):
+    pts = [(int(lms[i].x*w), int(lms[i].y*h)) for i in idxs]
     return np.array(pts, dtype=np.int32)
 
-def soft_dilate(mask, radius):
-    if radius <= 0: return mask
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius*2+1, radius*2+1))
-    return cv2.dilate(mask, k, iterations=1)
+def fill_poly_mask(shape, poly):
+    m = np.zeros(shape[:2], dtype=np.uint8)
+    cv2.fillPoly(m, [poly], 255)
+    return m
 
-def feather(mask, px):
-    if px <= 0: return mask.astype(np.float32)/255.0
+def keep_biggest(mask, k=KEEP_COMPONENTS, min_area=120):
+    num, lab, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    areas = []
+    for i in range(1, num):
+        areas.append((stats[i, cv2.CC_STAT_AREA], i))
+    areas.sort(reverse=True)
+    keep = np.zeros_like(mask)
+    taken = 0
+    for area, idx in areas:
+        if area >= min_area:
+            keep[lab==idx] = 255
+            taken += 1
+        if taken >= k:
+            break
+    return keep
+
+def feather_mask(mask, r=FEATHER):
+    if r <= 0:
+        return (mask>0).astype(np.float32)
     dist = cv2.distanceTransform((mask==0).astype(np.uint8), cv2.DIST_L2, 3)
-    edge = np.clip(dist, 0, px) / float(px)
-    # invert edge: 1 iekšā, uz 0 pie malas
-    feathered = (1.0 - (1.0 - edge)) * (mask>0)
-    # normalizācija
-    feathered = np.clip(feathered, 0, 1).astype(np.float32)
-    return feathered
+    band = np.clip(dist, 0, r)/float(r)
+    soft = np.clip((mask>0).astype(np.float32)*(1.0-(1.0-band)), 0, 1)
+    return soft
 
-def whiten_teeth_bounded(img_bgr):
-    mp, facemesh = get_facemesh()
-
-    h, w = img_bgr.shape[:2]
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    res = facemesh.process(img_rgb)
-    if not res.multi_face_landmarks:
-        return img_bgr  # nav seja – atgriežam sākotnējo
-
-    lms = res.multi_face_landmarks[0].landmark
-
-    # Poligoni
-    poly_outer = landmarks_to_polygon(lms, OUTER_IDX, w, h)
-    poly_inner = landmarks_to_polygon(lms, INNER_IDX, w, h)
-
-    lips_mask = np.zeros((h, w), dtype=np.uint8)
-    cv2.fillPoly(lips_mask, [poly_outer], 255)
-    inner_mask = np.zeros((h, w), dtype=np.uint8)
-    cv2.fillPoly(inner_mask, [poly_inner], 255)
-
-    # Teeth ROI = inner (mutas atvērums). Lips = outer - inner (neizmantojam).
-    teeth_roi = inner_mask.copy()
-
+def adaptive_teeth_mask(img_bgr, inner_mask):
+    """Atgriež mīkstu masku (float 0..1) tikai zobiem inner_mask iekšpusē."""
     # Krāsu telpas
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
     L, A, B = cv2.split(lab)
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
     H, S, V = cv2.split(hsv)
 
-    # Heuristiska maska: gaišs (L), nav sarkans (a* zem A_MAX), nav dzeltenīgs (b* zem B_MAX),
-    # kā arī zema piesātinātība (S zem SAT_MAX). Plus – tikai teeth_roi iekšpusē.
-    base_mask = (
-        (L >= L_MIN) &
-        (A <= (128 + A_MAX)) &  # LAB a* ap 128 centru
-        (B <= (128 + B_MAX)) &
-        (S <= SAT_MAX)
-    ).astype(np.uint8) * 255
+    roi = inner_mask>0
+    if roi.sum() < 50:
+        return np.zeros_like(L, dtype=np.float32)
 
-    mask = cv2.bitwise_and(base_mask, teeth_roi)
+    Lr = L[roi].astype(np.float32)
+    Ar = A[roi].astype(np.float32)
+    Br = B[roi].astype(np.float32)
+    Sr = S[roi].astype(np.float32)
+    Vr = V[roi].astype(np.float32)
 
-    # Tīrīšana un “salīmēšana”
+    # Procentiles (adaptīvi sliekšņi)
+    pL70 = np.percentile(Lr, 70)   # pietiekami gaišs
+    pL55 = np.percentile(Lr, 55)   # fallback
+    pS60 = np.percentile(Sr, 60)   # zema piesātinātība (lūpas ir augstāka S)
+    pS70 = np.percentile(Sr, 70)
+    a_med = np.median(Ar)          # lūpām a* parasti virs mediānas
+    b_med = np.median(Br)
+
+    # Primārā maska (stingrāka)
+    base = (
+        (L.astype(np.float32) >= pL70) &
+        (S.astype(np.float32) <= pS60) &
+        (A.astype(np.float32) <= a_med + 6.0) &
+        (B.astype(np.float32) <= b_med + 10.0)
+    )
+    base = base & roi
+
+    # Ja par maz pikseļu, atslābinām sliekšņus
+    if base.sum() < 0.02*roi.sum():
+        base = (
+            (L.astype(np.float32) >= pL55) &
+            (S.astype(np.float32) <= pS70) &
+            (A.astype(np.float32) <= a_med + 8.0) &
+            (B.astype(np.float32) <= b_med + 14.0)
+        )
+        base = base & roi
+
+    base = base.astype(np.uint8)*255
+
+    # Morfoloģija: atmet stūrus / lūpu malas
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1)
-    mask = soft_dilate(mask, 1)
+    base = cv2.morphologyEx(base, cv2.MORPH_OPEN, k, iterations=1)
+    base = cv2.dilate(base, k, iterations=1)
+
+    # Paturam 2 lielākās komponentes (augšējie/apakšējie zobi)
+    base = keep_biggest(base, k=KEEP_COMPONENTS, min_area=max(80, roi.sum()//500))
 
     # Mīksta mala
-    alpha = feather(mask, FEATHER_PX)  # [0..1]
+    soft = feather_mask(base, r=FEATHER)
+    return soft
 
-    # Balinām tikai L* kanālu, saglabājot krāsu
+def whiten_with_mask(img_bgr, soft_mask):
+    if soft_mask.max() <= 0:
+        return img_bgr
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    L, A, B = cv2.split(lab)
     Lf = L.astype(np.float32)
-    boost = WHITEN_BOOST * alpha
-    Lf = np.minimum(Lf + boost, L_CAP)
-    L_new = np.clip(Lf, 0, 255).astype(np.uint8)
 
-    lab_new = cv2.merge([L_new, A, B])
-    out = cv2.cvtColor(lab_new, cv2.COLOR_LAB2BGR)
+    # Palielinām L* virzienā uz TARGET_L, atkarībā no maskas intensitātes
+    gain = (TARGET_L - Lf)
+    gain[gain < 0] = 0
+    L_new = np.clip(Lf + gain * soft_mask, 0, TARGET_L).astype(np.uint8)
 
-    # Izmixējam tikai maskēto zonu (ja alpha nav binārs)
-    alpha3 = np.dstack([alpha, alpha, alpha])
-    out_mix = (alpha3 * out + (1 - alpha3) * img_bgr).astype(np.uint8)
-    return out_mix
+    out = cv2.cvtColor(cv2.merge([L_new, A, B]), cv2.COLOR_LAB2BGR)
+    # Izmixējam tikai maskēto zonu (ja maska nav 0/1)
+    alpha3 = np.dstack([soft_mask, soft_mask, soft_mask]).astype(np.float32)
+    blended = (alpha3*out + (1.0-alpha3)*img_bgr).astype(np.uint8)
+    return blended
+
+# ---------------- Flask app ----------------
+app = Flask(__name__)
+CORS(app)
 
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({"ok": True, "service": "Teeth Whitening API – precise teeth-only v3"})
+    return jsonify({"ok": True, "service": "Teeth Whitening API – adaptive teeth-only"})
 
 @app.route("/whiten", methods=["POST"])
 def whiten():
     if "file" not in request.files:
         return jsonify({"error": "No file"}), 400
-
-    f = request.files["file"]
-    data = f.read()
+    data = request.files["file"].read()
     img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         return jsonify({"error": "Bad image"}), 400
 
-    try:
-        out = whiten_teeth_bounded(img)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    mp, fm = get_facemesh()
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    res = fm.process(rgb)
+    if not res.multi_face_landmarks:
+        # ja nav sejas, atgriež sākotnējo
+        ok, enc = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        return send_file(io.BytesIO(enc.tobytes()), mimetype="image/jpeg")
+
+    h, w = img.shape[:2]
+    lms = res.multi_face_landmarks[0].landmark
+    inner_poly = landmarks_to_polygon(lms, INNER_IDX, w, h)
+    inner_mask = fill_poly_mask(img, inner_poly)
+
+    soft = adaptive_teeth_mask(img, inner_mask)
+    out = whiten_with_mask(img, soft)
 
     ok, enc = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
-    if not ok:
-        return jsonify({"error": "Encode failed"}), 500
-
-    return send_file(
-        io.BytesIO(enc.tobytes()),
-        mimetype="image/jpeg",
-        as_attachment=False,
-        download_name="whitened.jpg",
-    )
+    return send_file(io.BytesIO(enc.tobytes()), mimetype="image/jpeg", download_name="whitened.jpg")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
