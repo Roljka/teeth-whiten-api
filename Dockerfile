@@ -1,23 +1,16 @@
 FROM python:3.10-slim
 
-# OpenCV un diffusers vajadzīgās sistēmas bibliotēkas
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
-COPY . .
 
-# Kešu mapes (lai nesprāgst diska kvota un paātrina startu)
-ENV HF_HOME=/tmp/hf
-ENV TRANSFORMERS_CACHE=/tmp/hf
-ENV MPLCONFIGDIR=/tmp/mpl
-
+COPY requirements.txt .
 RUN pip install --upgrade pip
 RUN pip install -r requirements.txt
 
-# Izvēles solis: pre-cache modeli build laikā (ātrākam pirmajam startam)
-# Ja Free plāns/metru limits, vari izkomentēt šo rindu.
+COPY . .
 
-# Startēšana
-CMD gunicorn -w 1 -k gthread --threads 4 --timeout 300 --bind 0.0.0.0:10000 teeth_api:app
+ENV PYTORCH_JIT=0
+ENV OMP_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV HF_HUB_DISABLE_SYMLINKS_WARNING=1
+
+CMD ["gunicorn", "-b", "0.0.0.0:10000", "-k", "gthread", "--threads", "2", "teeth_api:app"]
