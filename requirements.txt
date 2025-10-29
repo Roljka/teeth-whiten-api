@@ -1,8 +1,6 @@
-flask
-flask-cors
-opencv-python-headless
-numpy
-diffusers==0.27.2
+flask==3.1.0
+flask-cors==5.0.0
+opencv-python-headless==4.9.0.80
+Pillow==10.3.0
+transformers==4.44.0
 torch==2.2.2
-transformers
-safetensors
