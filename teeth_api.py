@@ -14,7 +14,7 @@ from diffusers import StableDiffusionInpaintPipeline
 from PIL import Image
 import torch
 
-MODEL_ID = "SG161222/Realistic_Vision_V5.1_inpainting"
+MODEL_ID = "runwayml/stable-diffusion-inpainting"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
 
