@@ -5,14 +5,19 @@ import cv2
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 
-TARGET_L = 94.0
-FEATHER = 6
-KEEP_COMPONENTS = 2
+# ---- Parametri ----
+TARGET_L = 240.0     # mērķa gaišums zobiem (0..255, 240 dod baltu bez “izdegšanas”)
+ALPHA_MAX = 0.85     # cik stipri maisām zobu zonā (1.0 = tikai balinātais)
+FEATHER_PX = 8       # maskas mīkstināšana pikseļos
+KEEP_K = 2           # saglabāt lielākos komponentus (augša/apakša)
+MIN_AREA = 80        # minimālais laukums pikseļos vienai zobu komponentei
+
+# FaceMesh indeksu saraksti
+OUTER_IDX = [61,146,91,181,84,17,314,405,321,375,291,308]
+INNER_IDX = [78,95,88,178,87,14,317,402,318,324,308,415]
 
 _mp = None
 _facemesh = None
-OUTER_IDX = [61,146,91,181,84,17,314,405,321,375,291,308]
-INNER_IDX = [78,95,88,178,87,14,317,402,318,324,308,415]
 
 def get_facemesh():
     global _mp, _facemesh
@@ -27,109 +32,130 @@ def get_facemesh():
         )
     return _mp, _facemesh
 
-def landmarks_to_polygon(lms, idxs, w, h):
-    pts = [(int(lms[i].x*w), int(lms[i].y*h)) for i in idxs]
-    return np.array(pts, dtype=np.int32)
+def landmarks_poly(lms, idxs, w, h):
+    return np.array([(int(lms[i].x*w), int(lms[i].y*h)) for i in idxs], dtype=np.int32)
 
-def fill_poly_mask(img_shape, poly):
-    """img_shape = (H, W, C) vai (H, W)"""
-    h, w = img_shape[:2]
+def poly_mask(shape_hw, poly):
+    h, w = shape_hw
     m = np.zeros((h, w), dtype=np.uint8)
     if poly is not None and len(poly) >= 3:
         cv2.fillPoly(m, [poly], 255)
     return m
 
-def keep_biggest(mask, k=KEEP_COMPONENTS, min_area=120):
+def keep_biggest(mask, k=KEEP_K, min_area=MIN_AREA):
     num, lab, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    areas = []
-    for i in range(1, num):
-        areas.append((stats[i, cv2.CC_STAT_AREA], i))
-    areas.sort(reverse=True)
-    keep = np.zeros_like(mask)
+    if num <= 1:
+        return mask
+    # (area, idx) no lielākā uz mazāko
+    pairs = sorted([(stats[i, cv2.CC_STAT_AREA], i) for i in range(1, num)], reverse=True)
+    out = np.zeros_like(mask)
     taken = 0
-    for area, idx in areas:
+    for area, idx in pairs:
         if area >= min_area:
-            keep[lab==idx] = 255
+            out[lab == idx] = 255
             taken += 1
         if taken >= k:
             break
-    return keep
+    return out
 
-def feather_mask(mask, r=FEATHER):
+def feather(mask, r=FEATHER_PX):
     if r <= 0:
-        return (mask>0).astype(np.float32)
-    dist = cv2.distanceTransform((mask==0).astype(np.uint8), cv2.DIST_L2, 3)
-    band = np.clip(dist, 0, r)/float(r)
-    soft = np.clip((mask>0).astype(np.float32)*(1.0-(1.0-band)), 0, 1)
-    return soft
+        return (mask > 0).astype(np.float32)
+    soft = cv2.GaussianBlur(mask.astype(np.float32)/255.0, (0,0), r)
+    return np.clip(soft, 0, 1)
 
-def adaptive_teeth_mask(img_bgr, inner_mask):
+def suppress_lip_edge(inner_mask, poly, frac=0.25):
+    """Samazina masku pie augšējās lūpas malas (top 25% no mutes augstuma)."""
+    ys = poly[:,1]
+    top, bot = ys.min(), ys.max()
+    cut = int(top + (bot - top) * frac)
+    sup = inner_mask.copy().astype(np.float32)
+    sup[:cut, :] *= 0.2   # stipri vājinām pie augšlūpas
+    return np.clip(sup, 0, 255).astype(np.uint8)
+
+def teeth_mask(img_bgr, inner_mask, inner_poly):
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
     L, A, B = cv2.split(lab)
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
     H, S, V = cv2.split(hsv)
 
-    roi = inner_mask>0
+    roi = inner_mask > 0
     if roi.sum() < 50:
         return np.zeros_like(L, dtype=np.float32)
 
-    Lr = L[roi].astype(np.float32)
-    Ar = A[roi].astype(np.float32)
-    Br = B[roi].astype(np.float32)
-    Sr = S[roi].astype(np.float32)
-    Vr = V[roi].astype(np.float32)
+    Lr, Ar, Br, Sr = L[roi].astype(np.float32), A[roi].astype(np.float32), B[roi].astype(np.float32), S[roi].astype(np.float32)
+    # Sākuma sliekšņi
+    pL1, pL2 = np.percentile(Lr, 70), np.percentile(Lr, 55)
+    pS1, pS2 = np.percentile(Sr, 60), np.percentile(Sr, 72)
+    a_med, b_med = np.median(Ar), np.median(Br)
 
-    pL70 = np.percentile(Lr, 70)
-    pL55 = np.percentile(Lr, 55)
-    pS60 = np.percentile(Sr, 60)
-    pS70 = np.percentile(Sr, 70)
-    a_med = np.median(Ar)
-    b_med = np.median(Br)
-
-    base = (
-        (L.astype(np.float32) >= pL70) &
-        (S.astype(np.float32) <= pS60) &
-        (A.astype(np.float32) <= a_med + 6.0) &
-        (B.astype(np.float32) <= b_med + 10.0)
-    )
-    base = base & roi
-
-    if base.sum() < 0.02*roi.sum():
-        base = (
-            (L.astype(np.float32) >= pL55) &
-            (S.astype(np.float32) <= pS70) &
-            (A.astype(np.float32) <= a_med + 8.0) &
-            (B.astype(np.float32) <= b_med + 14.0)
+    def build(Lmin, Smax, a_off, b_off):
+        m = (
+            (L.astype(np.float32) >= Lmin) &
+            (S.astype(np.float32) <= Smax) &
+            (A.astype(np.float32) <= a_med + a_off) &
+            (B.astype(np.float32) <= b_med + b_off) &
+            roi
         )
-        base = base & roi
+        return (m.astype(np.uint8)*255)
 
-    base = base.astype(np.uint8)*255
+    m = build(pL1, pS1, 6.0, 10.0)
+    if m.sum() < 0.02*roi.sum():
+        m = build(pL2, pS2, 9.0, 15.0)
+
+    # Ja vēl par maz – KMeans iekš ROI (3 klasteri)
+    if m.sum() < 120:
+        coords = np.column_stack(np.where(roi))
+        vals = np.column_stack([L[roi].ravel(), A[roi].ravel(), B[roi].ravel(), S[roi].ravel()]).astype(np.float32)
+        K = 3 if len(vals) >= 150 else 2
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)
+        _, labels, centers = cv2.kmeans(vals, K, None, criteria, 3, cv2.KMEANS_PP_CENTERS)
+        # Izvēlamies klasi ar lielāko L un zemu S
+        best = None; best_score = -1e9
+        for i in range(K):
+            Lc, Ac, Bc, Sc = centers[i]
+            score = Lc - 0.8*Sc - 0.1*max(0, Ac - (a_med+6)) - 0.1*max(0, Bc - (b_med+10))
+            if score > best_score:
+                best_score, best = score, i
+        sel = (labels.ravel() == best)
+        m = np.zeros_like(inner_mask, dtype=np.uint8)
+        yy, xx = coords[sel][:,0], coords[sel][:,1]
+        m[yy, xx] = 255
+
+    # Morfoloģija + komponentes
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
-    base = cv2.morphologyEx(base, cv2.MORPH_OPEN, k, iterations=1)
-    base = cv2.dilate(base, k, iterations=1)
-    base = keep_biggest(base, k=KEEP_COMPONENTS, min_area=max(80, roi.sum()//500))
-    soft = feather_mask(base, r=FEATHER)
-    return soft
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, k, iterations=1)
+    m = cv2.dilate(m, k, iterations=1)
+    m = keep_biggest(m, k=KEEP_K, min_area=max(MIN_AREA, int(roi.sum()*0.002)))
 
-def whiten_with_mask(img_bgr, soft_mask):
+    # Lūpu malu vājināšana
+    m = suppress_lip_edge(m, inner_poly, frac=0.25)
+
+    return feather(m, FEATHER_PX)
+
+def apply_whitening(img_bgr, soft_mask):
     if soft_mask.max() <= 0:
         return img_bgr
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
     L, A, B = cv2.split(lab)
     Lf = L.astype(np.float32)
-    gain = (TARGET_L - Lf); gain[gain < 0] = 0
-    L_new = np.clip(Lf + gain * soft_mask, 0, TARGET_L).astype(np.uint8)
+    # delta uz mērķi
+    delta = np.clip(TARGET_L - Lf, 0, 255)
+    # lokāls spēks
+    alpha = np.clip(soft_mask * ALPHA_MAX, 0, 1).astype(np.float32)
+    L_new = np.clip(Lf + delta * alpha, 0, 255).astype(np.uint8)
     out = cv2.cvtColor(cv2.merge([L_new, A, B]), cv2.COLOR_LAB2BGR)
-    alpha3 = np.dstack([soft_mask, soft_mask, soft_mask]).astype(np.float32)
-    blended = (alpha3*out + (1.0-alpha3)*img_bgr).astype(np.uint8)
-    return blended
+    # tikai zobu zonā; ārpus – oriģināls
+    alpha3 = np.dstack([alpha, alpha, alpha])
+    return (alpha3*out + (1.0-alpha3)*img_bgr).astype(np.uint8)
 
+# ---- Flask ----
 app = Flask(__name__)
 CORS(app)
 
 @app.route("/", methods=["GET"])
-def root():
-    return jsonify({"ok": True, "service": "Teeth Whitening API – adaptive teeth-only"})
+def health():
+    return jsonify({"ok": True, "service": "AI Teeth Whitening – teeth-only vFinal"})
 
 @app.route("/whiten", methods=["POST"])
 def whiten():
@@ -149,11 +175,11 @@ def whiten():
 
     h, w = img.shape[:2]
     lms = res.multi_face_landmarks[0].landmark
-    inner_poly = landmarks_to_polygon(lms, INNER_IDX, w, h)
-    inner_mask = fill_poly_mask(img.shape, inner_poly)
+    inner_poly = landmarks_poly(lms, INNER_IDX, w, h)
+    inner_mask = poly_mask((h, w), inner_poly)
 
-    soft = adaptive_teeth_mask(img, inner_mask)
-    out = whiten_with_mask(img, soft)
+    soft = teeth_mask(img, inner_mask, inner_poly)  # 0..1
+    out = apply_whitening(img, soft)
 
     ok, enc = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
     return send_file(io.BytesIO(enc.tobytes()), mimetype="image/jpeg", download_name="whitened.jpg")
