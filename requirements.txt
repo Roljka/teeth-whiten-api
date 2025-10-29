@@ -1,8 +1,6 @@
-flask==3.1.0
-flask-cors==5.0.0
-opencv-python-headless==4.9.0.80
-Pillow==10.3.0
-transformers==4.44.0
-torch==2.2.2
-numpy<2.0.0
+flask==3.0.2
+Pillow==10.0.1
+opencv-python-headless==4.10.0.84
+mediapipe==0.10.14
+numpy==1.26.4
 gunicorn==23.0.0
