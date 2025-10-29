@@ -1,7 +1,14 @@
 flask
+flask-cors
 opencv-python
 mediapipe
 numpy
-pillow
+Pillow
 gunicorn
-flask-cors
+# AI inpainting
+torch==2.3.1+cpu ; sys_platform == 'linux'
+--extra-index-url https://download.pytorch.org/whl/cpu
+diffusers
+transformers
+safetensors
+accelerate
