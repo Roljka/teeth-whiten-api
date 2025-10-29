@@ -1,15 +1,8 @@
 flask
 flask-cors
-opencv-python
-mediapipe
+opencv-python-headless
 numpy
-Pillow
-gunicorn
-
-# AI inpainting (CPU draudzīgi; ja GPU, darbosies automātiski)
-torch==2.3.1+cpu ; sys_platform == 'linux'
---extra-index-url https://download.pytorch.org/whl/cpu
-diffusers
+diffusers==0.27.2
+torch==2.2.2
 transformers
 safetensors
-accelerate
