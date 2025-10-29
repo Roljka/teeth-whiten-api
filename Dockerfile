@@ -1,16 +1,17 @@
 FROM python:3.10-slim
 
-WORKDIR /app
+# Instalē sistēmas atkarības priekš OpenCV
+RUN apt-get update && apt-get install -y \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 
+WORKDIR /app
 COPY requirements.txt .
-RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-ENV PYTORCH_JIT=0
-ENV OMP_NUM_THREADS=1
-ENV MKL_NUM_THREADS=1
-ENV HF_HUB_DISABLE_SYMLINKS_WARNING=1
-
-CMD ["gunicorn", "-b", "0.0.0.0:10000", "-k", "gthread", "--threads", "2", "teeth_api:app"]
+# Start komanda
+CMD ["gunicorn", "--workers", "1", "--threads", "8", "--timeout", "120", "teeth_api:app"]
