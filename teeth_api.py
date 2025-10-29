@@ -6,7 +6,7 @@ from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import mediapipe as mp
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "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").strip()
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 if not OPENAI_API_KEY:
     raise RuntimeError("Set env var OPENAI_API_KEY")
 
