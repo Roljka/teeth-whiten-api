@@ -1,72 +1,86 @@
-from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
+from flask import Flask, request, send_file, jsonify
+from PIL import Image
 import io
-import cv2
 import numpy as np
-from PIL import Image, ImageEnhance
-from transformers import pipeline
+import cv2
+import mediapipe as mp
 
 app = Flask(__name__)
-CORS(app)
 
-# Modeli ielādē tikai pēc pirmā pieprasījuma
-model = None
+mp_face_mesh = mp.solutions.face_mesh
 
-def get_model():
-    global model
-    if model is None:
-        model = pipeline(
-            "image-to-image",
-            model="stabilityai/sd-turbo",
-            safety_checker=None
-        )
-    return model
+def whiten_teeth_only(image_pil):
+    # pārvērš PIL -> numpy RGB
+    img_rgb = np.array(image_pil.convert("RGB"))
+    h, w, _ = img_rgb.shape
+
+    # Inicializē FaceMesh
+    with mp_face_mesh.FaceMesh(
+        static_image_mode=True,
+        refine_landmarks=True,
+        max_num_faces=1,
+        min_detection_confidence=0.5
+    ) as face_mesh:
+
+        results = face_mesh.process(cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR))
+
+        if not results.multi_face_landmarks:
+            print("❌ Seju neatrod.")
+            return image_pil  # Atgriež sākotnējo, ja neko neatpazīst
+
+        # Izveido masku
+        mask = np.zeros((h, w), dtype=np.uint8)
+
+        # Piemēro muti (ap lūpām + zobi)
+        for face_landmarks in results.multi_face_landmarks:
+            mouth_points = [
+                61, 76, 78, 80, 82, 84, 13, 312, 310, 308, 402, 324, 318, 14
+            ]
+            pts = np.array([
+                (int(face_landmarks.landmark[i].x * w),
+                 int(face_landmarks.landmark[i].y * h))
+                for i in mouth_points
+            ], np.int32)
+
+            # aizpilda muti ar baltu zonu (mask)
+            cv2.fillPoly(mask, [pts], 255)
+
+        # Izbalina tikai maskā
+        hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
+        h_, s_, v_ = cv2.split(hsv)
+
+        # Pielieto tikai maskētajā zonā
+        whitened_v = v_.astype(np.float32)
+        whitened_v[mask == 255] = np.clip(whitened_v[mask == 255] * 1.45, 0, 255)
+
+        v_ = whitened_v.astype(np.uint8)
+        hsv_whitened = cv2.merge([h_, s_, v_])
+        img_result = cv2.cvtColor(hsv_whitened, cv2.COLOR_HSV2RGB)
+
+        return Image.fromarray(img_result)
 
 
-def whiten_teeth(image):
-    """Vienkāršs, ātrs un stabils zobu balinātājs bez pilnas sejas gaišināšanas"""
-    img_array = np.array(image.convert("RGB"))
-    hsv = cv2.cvtColor(img_array, cv2.COLOR_RGB2HSV)
+@app.route('/whiten', methods=['POST'])
+def whiten_image():
+    if 'file' not in request.files:
+        return jsonify({"error": "Nav augšupielādēts fails"}), 400
 
-    # Tiek meklēti baltie reģioni (zobi) — maska ar vieglu pelēcības pielaidi
-    lower_white = np.array([0, 0, 180], dtype=np.uint8)
-    upper_white = np.array([179, 60, 255], dtype=np.uint8)
-    mask = cv2.inRange(hsv, lower_white, upper_white)
+    file = request.files['file']
+    image = Image.open(file.stream)
+    result_image = whiten_teeth_only(image)
 
-    # Mazliet palielina spilgtumu tikai maskētajos reģionos
-    value = 35  # intensitāte
-    hsv[..., 2] = np.clip(hsv[..., 2] + (mask > 0) * value, 0, 255)
+    # saglabā rezultātu kā JPG atmiņā
+    img_io = io.BytesIO()
+    result_image.save(img_io, 'JPEG', quality=95)
+    img_io.seek(0)
 
-    enhanced = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
-    return Image.fromarray(enhanced)
+    return send_file(img_io, mimetype='image/jpeg')
 
 
-@app.route("/")
+@app.route('/')
 def home():
-    return jsonify({"status": "Teeth Whitening API Light v3 😁"})
+    return jsonify({"status": "🦷 Teeth Whitening API darbojas!"})
 
 
-@app.route("/whiten", methods=["POST"])
-def whiten():
-    try:
-        if "file" not in request.files:
-            return jsonify({"error": "No file uploaded"}), 400
-
-        file = request.files["file"]
-        image = Image.open(file.stream).convert("RGB")
-
-        # Balināšana (ātrā lokālā metode)
-        whitened_image = whiten_teeth(image)
-
-        # Atgriež kā JPEG
-        buf = io.BytesIO()
-        whitened_image.save(buf, format="JPEG")
-        buf.seek(0)
-        return send_file(buf, mimetype="image/jpeg")
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
