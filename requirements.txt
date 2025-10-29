@@ -5,7 +5,8 @@ mediapipe
 numpy
 Pillow
 gunicorn
-# AI inpainting
+
+# AI inpainting (CPU draudzīgi; ja GPU, darbosies automātiski)
 torch==2.3.1+cpu ; sys_platform == 'linux'
 --extra-index-url https://download.pytorch.org/whl/cpu
 diffusers
