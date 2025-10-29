@@ -18,11 +18,11 @@ face_mesh = mp_face_mesh.FaceMesh(
     min_detection_confidence=0.5
 )
 
-def pil_to_bgr(pil_img: Image.Image) -> np.ndarray:
+def pil_to_bgr(pil_img):
     rgb = pil_img.convert("RGB")
     return cv2.cvtColor(np.array(rgb), cv2.COLOR_RGB2BGR)
 
-def load_image_fix_orientation(file_storage, max_side=1600) -> np.ndarray:
+def load_image_fix_orientation(file_storage, max_side=1600):
     img = Image.open(file_storage.stream)
     img = ImageOps.exif_transpose(img)
     w, h = img.size
@@ -31,27 +31,39 @@ def load_image_fix_orientation(file_storage, max_side=1600) -> np.ndarray:
         img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
     return pil_to_bgr(img)
 
-# pieklājīga iekšlūpu punktu kopa FaceMesh indeksiem (stabila praktiski)
-INNER_LIP_IDX = sorted({
-    0, 11, 12, 13, 14, 15, 16, 61, 62, 63, 64, 65, 66, 67,
-    78, 79, 80, 81, 82, 87, 88, 89, 90, 91, 95,
-    146, 164, 178, 191, 267, 268, 269, 270, 271, 272, 273, 274,
-    275, 291, 292, 293, 294, 295, 296, 297, 313, 314, 315, 324,
-    375, 402, 405, 409, 415, 417
-})
-
-def poly_mask_from_indices(h, w, landmarks, idx_set) -> np.ndarray:
+# ---------- MUTES MASKU BŪVE (droša) ----------
+def lips_outer_mask(h, w, landmarks) -> (np.ndarray, tuple):
+    """Hull no FACEMESH_LIPS punktiem + drošības bbox (apgriež ROI)."""
+    idx = set()
+    for a, b in mp_face_mesh.FACEMESH_LIPS:
+        idx.add(a); idx.add(b)
     pts = []
-    for i in idx_set:
-        if i < len(landmarks):
-            lm = landmarks[i]
-            pts.append([int(lm.x * w), int(lm.y * h)])
+    for i in idx:
+        lm = landmarks[i]
+        pts.append([int(lm.x * w), int(lm.y * h)])
     pts = np.array(pts, dtype=np.int32)
+
     mask = np.zeros((h, w), np.uint8)
     if len(pts) >= 3:
         hull = cv2.convexHull(pts)
         cv2.fillConvexPoly(mask, hull, 255)
-    return mask
+        x, y, bw, bh = cv2.boundingRect(hull)
+        # drošības rezerve ap muti (ne vairāk par attēla robežām)
+        pad = int(round(max(bw, bh) * 0.4))
+        x0 = max(0, x - pad); y0 = max(0, y - pad)
+        x1 = min(w, x + bw + pad); y1 = min(h, y + bh + pad)
+        bbox = (x0, y0, x1, y1)
+        return mask, bbox
+    return mask, (0, 0, w, h)
+
+def mouth_inner_mask(outer_mask: np.ndarray) -> np.ndarray:
+    """Iegūst iekšējo mutes zonu (ne skart lūpas): erode atkarībā no mutes izmēra."""
+    area = int(np.count_nonzero(outer_mask))
+    # kodola izmēru balstu pret mutes laukumu (robusti dažādiem attēliem)
+    k = max(2, int(round(np.sqrt(max(area,1)) / 30)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    inner = cv2.erode(outer_mask, kernel, iterations=1)
+    return inner
 
 def mad(x):
     x = x.astype(np.float32)
@@ -66,10 +78,10 @@ def remove_small_components(mask, min_area):
             out[labels == i] = 255
     return out
 
-def build_teeth_mask_adaptive(bgr: np.ndarray, inner_lip_mask: np.ndarray) -> np.ndarray:
+def build_teeth_mask_adaptive(bgr: np.ndarray, inner_roi: np.ndarray) -> np.ndarray:
     """Adaptīva zobu maska mutes iekšienē (LAB/HSV/YCrCb + cv2.kmeans)."""
     h, w = bgr.shape[:2]
-    roi = inner_lip_mask > 0
+    roi = inner_roi > 0
     if np.count_nonzero(roi) == 0:
         return np.zeros((h, w), np.uint8)
 
@@ -80,14 +92,11 @@ def build_teeth_mask_adaptive(bgr: np.ndarray, inner_lip_mask: np.ndarray) -> np
     ycrcb = cv2.cvtColor(bgr, cv2.COLOR_BGR2YCrCb)
     _, Cr, _ = cv2.split(ycrcb)
 
-    L_roi = L[roi]; B_roi = B[roi]; S_roi = S[roi]; Cr_roi = Cr[roi]
-    mad_L, med_L = mad(L_roi)
-    mad_B, med_B = mad(B_roi)
-    mad_S, med_S = mad(S_roi)
-    mad_Cr, med_Cr = mad(Cr_roi)
+    Lr, Br, Sr, Crr = L[roi], B[roi], S[roi], Cr[roi]
+    mad_L, med_L = mad(Lr); mad_B, med_B = mad(Br)
+    mad_S, med_S = mad(Sr); mad_Cr, med_Cr = mad(Crr)
 
-    # adaptīvie sliekšņi
-    kL, kB, kS, kCr = 0.8, 0.6, 1.2, 0.8
+    kL, kB, kS, kCr = 0.8, 0.6, 1.2, 1.0  # lips supresijai mazliet stingrāks Cr
     cond_bright   = L > (med_L + kL * mad_L)
     cond_less_yel = B < (med_B - kB * mad_B)
     cond_not_sat  = S < (med_S + kS * mad_S)
@@ -95,16 +104,15 @@ def build_teeth_mask_adaptive(bgr: np.ndarray, inner_lip_mask: np.ndarray) -> np
 
     base = cond_bright & cond_less_yel & cond_not_sat & roi & (~lips_red)
 
-    # ---- cv2.kmeans uz [L, B] ROI iekšā (bez sklearn) ----
+    # --- cv2.kmeans (bez sklearn) uz ROI [L, B] ---
     ys, xs = np.where(roi)
-    feat = np.stack([L[ys, xs].astype(np.float32), B[ys, xs].astype(np.float32)], axis=1)
-    Z = feat.astype(np.float32)
+    Z = np.stack([L[ys, xs].astype(np.float32), B[ys, xs].astype(np.float32)], axis=1)
     try:
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)
         K = 3
-        ret, labels, centers = cv2.kmeans(Z, K, None, criteria, 5, cv2.KMEANS_PP_CENTERS)
+        _ret, labels, centers = cv2.kmeans(Z, K, None, criteria, 5, cv2.KMEANS_PP_CENTERS)
         centers = centers.astype(np.float32)  # [K,2] -> [L,B]
-        score = centers[:, 0] - centers[:, 1]  # augsts L un zems B
+        score = centers[:, 0] - centers[:, 1]  # augsts L, zems B
         best = int(np.argmax(score))
         km_mask = np.zeros((h, w), np.uint8)
         km_mask[ys, xs] = (labels.flatten() == best).astype(np.uint8) * 255
@@ -116,8 +124,11 @@ def build_teeth_mask_adaptive(bgr: np.ndarray, inner_lip_mask: np.ndarray) -> np
     mask = np.zeros((h, w), np.uint8); mask[cand] = 255
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-    min_area = max(40, int(0.0005 * np.count_nonzero(roi)))
+
+    # atmet mazās pikseļu salas
+    min_area = max(50, int(0.0006 * np.count_nonzero(roi)))
     mask = remove_small_components(mask, min_area)
+    # nedaudz atvirzāmies no līnijām uz smaganām/lūpām
     mask = cv2.erode(mask, kernel, iterations=1)
     return mask
 
@@ -145,6 +156,7 @@ def whiten():
     try:
         if "file" not in request.files:
             return jsonify(error="File missing: use multipart/form-data with field 'file'."), 400
+
         bgr = load_image_fix_orientation(request.files["file"])
         h, w = bgr.shape[:2]
 
@@ -153,11 +165,21 @@ def whiten():
             return jsonify(error="Face not found"), 422
         lm = res.multi_face_landmarks[0].landmark
 
-        inner_mask = poly_mask_from_indices(h, w, lm, INNER_LIP_IDX)
-        if np.count_nonzero(inner_mask) == 0:
+        # 1) Lūpu ārējā maska + bbox
+        outer_lips, (x0, y0, x1, y1) = lips_outer_mask(h, w, lm)
+        if np.count_nonzero(outer_lips) == 0:
             return jsonify(error="Mouth not detected"), 422
 
-        teeth_mask = build_teeth_mask_adaptive(bgr, inner_mask)
+        # 2) Iekšējā mutes maska (ne skart lūpas)
+        inner = mouth_inner_mask(outer_lips)
+
+        # 3) Stingrs ROI – nogriežam visu ārpus drošības bbox
+        bbox_mask = np.zeros((h, w), np.uint8)
+        bbox_mask[y0:y1, x0:x1] = 255
+        inner_roi = cv2.bitwise_and(inner, bbox_mask)
+
+        # 4) Zobu maska + balināšana
+        teeth_mask = build_teeth_mask_adaptive(bgr, inner_roi)
         out = whiten_lab(bgr, teeth_mask, l_gain=18, b_shift=22, alpha=0.9)
 
         _, buf = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
