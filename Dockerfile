@@ -1,7 +1,10 @@
-FROM python:3.10-slim
+FROM debian:bullseye-slim
 
-# Instalē sistēmas atkarības priekš OpenCV
+# Instalē Python un nepieciešamās sistēmas atkarības
 RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-dev \
     libgl1-mesa-glx \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
@@ -9,7 +12,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 COPY . .
 
