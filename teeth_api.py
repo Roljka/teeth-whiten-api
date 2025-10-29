@@ -6,13 +6,11 @@ import io
 from PIL import Image
 
 app = Flask(__name__)
-CORS(app)  # Atļauj pieprasījumus no jebkuras vietnes (Elementor, u.c.)
+CORS(app)
 
 def whiten_teeth(image):
     """Atrod zobus un balina tikai tos"""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    # Izmanto Haar kaskādi smaida (zobu) detekcijai
     smile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_smile.xml')
     smiles = smile_cascade.detectMultiScale(gray, scaleFactor=1.7, minNeighbors=25, minSize=(40, 40))
 
@@ -20,21 +18,15 @@ def whiten_teeth(image):
     for (x, y, w, h) in smiles:
         cv2.ellipse(mask, (x + w // 2, y + h // 2), (w // 2, int(h / 2.5)), 0, 0, 360, 255, -1)
 
-    # Balināšana tikai maskētajās zonās (zobi)
     result = image.copy()
     hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV)
-
-    # Pacelam brightness (V) tikai zobu reģionos
     h, s, v = cv2.split(hsv)
-    v = cv2.add(v, (mask > 0).astype(np.uint8) * 40)  # Palielina gaišumu zobos
+    v = cv2.add(v, (mask > 0).astype(np.uint8) * 40)
     final_hsv = cv2.merge((h, s, np.clip(v, 0, 255)))
-
     result = cv2.cvtColor(final_hsv, cv2.COLOR_HSV2BGR)
 
-    # Neliels izlīdzinājums, lai nav robežu ap zobiem
     blurred_mask = cv2.GaussianBlur(mask, (21, 21), 11)
     result = np.where(blurred_mask[..., None] > 0, result, image)
-
     return result
 
 @app.route("/")
@@ -51,10 +43,7 @@ def whiten():
     image = np.array(image)
     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-    # Izsauc balināšanas funkciju
     processed_image = whiten_teeth(image)
-
-    # Konvertē uz atpakaļ JPG
     _, buffer = cv2.imencode(".jpg", processed_image)
     io_buf = io.BytesIO(buffer)
     return send_file(io_buf, mimetype="image/jpeg")
