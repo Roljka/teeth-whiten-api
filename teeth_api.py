@@ -4,166 +4,165 @@ import cv2
 import numpy as np
 import tempfile, os
 
+# =============== Flask & CORS ===============
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# --------------------------
-# UTIL: droši saglabā un atgriež failu
-# --------------------------
-def _save_and_send(img, name="output.jpg"):
+# =============== Globālie ielādētie resursi (modelis) ===============
+# Ielādē SD inpainting modeli vienreiz (lai katrs pieprasījums nav smags)
+from diffusers import StableDiffusionInpaintPipeline
+from PIL import Image
+import torch
+
+MODEL_ID = "SG161222/Realistic_Vision_V5.1_inpainting"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
+
+pipe = StableDiffusionInpaintPipeline.from_pretrained(MODEL_ID, torch_dtype=DTYPE)
+pipe = pipe.to(DEVICE)
+
+# Iesakāms CPU režīmā ierobežot pavedienus (mazāk RAM pīķu)
+if DEVICE == "cpu":
+    torch.set_num_threads(2)
+
+# =============== Palīgfunkcijas ===============
+def save_and_send(bgr_img, name="whitened.jpg"):
     out_path = os.path.join(tempfile.gettempdir(), name)
-    cv2.imwrite(out_path, img)
+    cv2.imwrite(out_path, bgr_img)
     return send_file(out_path, mimetype="image/jpeg")
 
-# --------------------------
-# FAST režīms: HSV pikseļu balināšana tikai “zobu baltajā” spektrā
-# --------------------------
-def whiten_fast(img, intensity=25):
-    # Konvertē uz HSV: zobi = gaiši ar zemu S
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    # Šie sliekšņi ir konservatīvi, lai neaiztiktu ādu/lūpas
-    lower = np.array([0,   0, 170], dtype=np.uint8)
+def resize_to_sd_multiple(img_bgr, max_side=768):
+    h, w = img_bgr.shape[:2]
+    scale = min(1.0, max_side / max(h, w))
+    new_w, new_h = int(w * scale), int(h * scale)
+
+    # saskaņo ar 64 (SD prasība)
+    def snap64(x): 
+        return max(64, (x // 64) * 64)
+    new_w = snap64(new_w)
+    new_h = snap64(new_h)
+    if new_w < 64: new_w = 64
+    if new_h < 64: new_h = 64
+
+    if (new_w, new_h) != (w, h):
+        return cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA), (w, h)
+    return img_bgr.copy(), None
+
+def make_teeth_mask(bgr_img):
+    """
+    1) Atrodam mutes iekšpuses poligonu ar MediaPipe FaceMesh
+    2) Poligonā atlasām “balto” spektru HSV (zobi) – lai izslēgtu lūpas/iemuti
+    3) Tīram un mīkstinām masku
+    """
+    # Mediapipe ielāde lokāli funkcijā, lai neveidotu globālu TF init uzreiz
+    import mediapipe as mp
+    mp_face_mesh = mp.solutions.face_mesh
+
+    h, w = bgr_img.shape[:2]
+    rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
+
+    mask_poly = np.zeros((h, w), dtype=np.uint8)
+    with mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=False) as fm:
+        res = fm.process(rgb)
+        if not res.multi_face_landmarks:
+            return np.zeros((h, w), dtype=np.uint8)
+
+        lms = res.multi_face_landmarks[0].landmark
+        # Iekšējās lūpas/ mute (iekšējās kontūras): 78..87 un 308..317
+        inner_idx = list(range(78, 88)) + list(range(308, 318))
+        pts = np.array([[int(lms[i].x * w), int(lms[i].y * h)] for i in inner_idx], dtype=np.int32)
+
+        if len(pts) >= 3:
+            cv2.fillPoly(mask_poly, [pts], 255)
+
+    # HSV filtrs zobiem (gaiši, ar zemu piesātinājumu)
+    hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
+    lower = np.array([0,   0, 160], dtype=np.uint8)
     upper = np.array([180, 60, 255], dtype=np.uint8)
-    mask = cv2.inRange(hsv, lower, upper)
+    mask_color = cv2.inRange(hsv, lower, upper)
 
-    # Tikai mutes rajonam – mēģinām šaurināt ar sejas/mutes aproksimāciju (fallback, ja nav mediapipe)
-    # Mazs morfoloģiskais tīrīšanas solis
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3,3),np.uint8), iterations=1)
-    mask = cv2.GaussianBlur(mask, (15, 15), 6)
+    # Kombinē: tikai mutes iekšpusē un baltajā spektrā
+    mask = cv2.bitwise_and(mask_poly, mask_color)
 
-    out = img.copy()
-    # Palielinām tikai Luma (praktiski – pieplusojam RGB vienādi)
-    add = np.zeros_like(out)
-    add[:, :, :] = intensity
-    out[mask > 0] = cv2.add(out[mask > 0], add[mask > 0])
-    return out
+    # Morfoloģija + blur, lai zobi būtu vienmērīgi
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), iterations=1)
+    mask = cv2.GaussianBlur(mask, (21, 21), 10)
 
-# --------------------------
-# AI režīms: Mediapipe maska + Stable Diffusion Inpainting
-# --------------------------
-def whiten_ai(img, prompt_intensity="natural"):
-    # 1) mērogs, lai ātrāk (SD labāk strādā 512–768px garajā malā)
-    h, w = img.shape[:2]
-    scale = 768 / max(h, w)
-    if scale < 1.0:
-        img_small = cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_AREA)
-    else:
-        img_small = img.copy()
+    return mask
 
-    # 2) ģenerē masku ar mediapipe (muti → mutes iekšpuse)
-    try:
-        import mediapipe as mp
-        mp_face_mesh = mp.solutions.face_mesh
-        with mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=True) as face_mesh:
-            res = face_mesh.process(cv2.cvtColor(img_small, cv2.COLOR_BGR2RGB))
-            if not res.multi_face_landmarks:
-                # Ja nav sejas – fallback uz fast
-                return whiten_fast(img)
+def prompt_for_level(level: str):
+    level = (level or "natural").lower()
+    if level == "hollywood":
+        return "whiten teeth significantly but naturally, keep gums, lips, skin and lighting unchanged, photorealistic, high quality"
+    if level == "bright":
+        return "whiten teeth slightly more than natural, keep gums, lips, skin and lighting unchanged, photorealistic"
+    return "whiten teeth naturally, keep gums, lips, skin and lighting unchanged, photorealistic"
 
-            sh, sw = img_small.shape[:2]
-            mask = np.zeros((sh, sw), dtype=np.uint8)
-
-            # Iekšējās lūpas/teeth tuvā zona:
-            inner_idx = list(range(78, 88)) + list(range(308, 318))
-            pts = []
-            for lm in res.multi_face_landmarks[0].landmark:
-                pts.append((int(lm.x * sw), int(lm.y * sh)))
-            inner = np.array([pts[i] for i in inner_idx], dtype=np.int32)
-
-            cv2.fillPoly(mask, [inner], 255)
-            mask = cv2.GaussianBlur(mask, (21,21), 10)
-
-    except Exception:
-        # Ja mediapipe nav vai “misēklis” – fallback uz fast
-        return whiten_fast(img)
-
-    # 3) sagatavo SD inpainting ievadi
-    from PIL import Image
-    from diffusers import StableDiffusionInpaintPipeline
-    import torch
-
-    # Uz augšu uz SD izmēru
-    if scale < 1.0:
-        input_sd = cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_AREA)
-    else:
-        input_sd = img.copy()
-
-    # Maskai jābūt RGB ar baltu zonu (kur jālabo) un melnu citur
-    mask_rgb = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-
-    image_pil = Image.fromarray(cv2.cvtColor(input_sd, cv2.COLOR_BGR2RGB))
-    mask_pil = Image.fromarray(mask_rgb).convert("RGB")
-
-    # Prompt – izvēle pēc intensitātes
-    if prompt_intensity == "hollywood":
-        prompt = "whiten teeth significantly but naturally, keep gums, lips, skin and lighting unchanged, photorealistic, high quality"
-    elif prompt_intensity == "bright":
-        prompt = "whiten teeth a bit more than natural, keep gums, lips, skin and lighting unchanged, photorealistic"
-    else:
-        prompt = "whiten teeth naturally, keep gums, lips, skin and lighting unchanged, photorealistic"
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    pipe = StableDiffusionInpaintPipeline.from_pretrained(
-        "stabilityai/stable-diffusion-2-inpainting",
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32
-    ).to(device)
-
-    result = pipe(
-        prompt=prompt,
-        image=image_pil,
-        mask_image=mask_pil,
-        guidance_scale=7.0,
-        num_inference_steps=30
-    ).images[0]
-
-    out_sd = cv2.cvtColor(np.array(result), cv2.COLOR_RGB2BGR)
-
-    # 4) ja samazinājām – uzskalo atpakaļ uz oriģinālo izmēru
-    if scale < 1.0:
-        out_final = cv2.resize(out_sd, (w, h), interpolation=cv2.INTER_CUBIC)
-    else:
-        out_final = out_sd
-
-    return out_final
-
-# --------------------------
-# ROUTES
-# --------------------------
+# =============== Endpoints ===============
 @app.route("/")
 def home():
-    return jsonify({"message": "Teeth Whitening API – fast & ai modes ready 😁"})
+    return jsonify({"message": "Teeth Whitening API — Realistic Inpainting + Auto teeth detection 😁", "device": DEVICE})
+
+@app.route("/health")
+def health():
+    try:
+        _ = pipe  # ja nav izveidojies, mestu izņēmumu
+        return jsonify({"ok": True, "model": MODEL_ID, "device": DEVICE})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route("/whiten", methods=["POST"])
 def whiten():
     if "file" not in request.files:
         return jsonify({"error": "Nav augšupielādēta bilde"}), 400
 
-    mode = request.form.get("mode", "fast")  # fast | ai
-    intensity = int(request.form.get("intensity", 25))  # fast režīmam (10–50)
-    ai_level = request.form.get("ai_level", "natural")  # natural | bright | hollywood
+    ai_level = request.form.get("ai_level", "natural")
+    guidance = float(request.form.get("guidance", 7.0))
+    steps = int(request.form.get("steps", 28))
 
     # ielasa attēlu
     f = request.files["file"]
     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
         f.save(tmp.name)
         img = cv2.imread(tmp.name)
-
     if img is None:
         return jsonify({"error": "Nevar nolasīt attēlu"}), 400
 
-    try:
-        if mode == "ai":
-            out = whiten_ai(img, prompt_intensity=ai_level)
-        else:
-            out = whiten_fast(img, intensity=intensity)
-        return _save_and_send(out, "whitened.jpg")
-    except Exception as e:
-        # Ja AI režīms krīt – fallback uz fast
-        try:
-            out = whiten_fast(img, intensity=intensity)
-            return _save_and_send(out, "whitened_fallback.jpg")
-        except Exception:
-            return jsonify({"error": f"Apstrādes kļūda: {str(e)}"}), 500
+    # sagatavo izmēru SD modelim
+    img_sd, orig_shape = resize_to_sd_multiple(img, max_side=768)
+
+    # ģenerē automātisku zobu masku
+    mask_gray = make_teeth_mask(img_sd)
+
+    # drošībai — ja maska pārāk tukša, nelaižam cauri
+    if int(cv2.countNonZero(mask_gray)) < 50:
+        # ja mediapipe netrāpa, atgriežam oriģinālu (vai varam maigi pastiprināt HSV)
+        return save_and_send(img, "whitened_nochange.jpg")
+
+    # SD inpainting vajag RGB PIL + RGB masku (balts=rediģēt, melns=atstāt)
+    mask_rgb = cv2.cvtColor(mask_gray, cv2.COLOR_GRAY2RGB)
+    image_pil = Image.fromarray(cv2.cvtColor(img_sd, cv2.COLOR_BGR2RGB))
+    mask_pil = Image.fromarray(mask_rgb).convert("RGB")
+
+    prompt = prompt_for_level(ai_level)
+
+    # Inference
+    result = pipe(
+        prompt=prompt,
+        image=image_pil,
+        mask_image=mask_pil,
+        guidance_scale=guidance,
+        num_inference_steps=steps
+    ).images[0]
+
+    out_bgr = cv2.cvtColor(np.array(result), cv2.COLOR_RGB2BGR)
+
+    # atskalo uz oriģinālo izmēru, ja samazinājām
+    if orig_shape is not None:
+        ow, oh = orig_shape
+        out_bgr = cv2.resize(out_bgr, (ow, oh), interpolation=cv2.INTER_CUBIC)
+
+    return save_and_send(out_bgr, "whitened.jpg")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
