@@ -18,3 +18,5 @@ ENV HF_HOME=/tmp/hf
 
 # Noklusētā palaišana (pielāgo Render “Start Command”, ja vēlies)
 CMD gunicorn -w 1 -k gthread --threads 4 --timeout 180 --bind 0.0.0.0:10000 teeth_api:app
+# Kešot modeli build laikā
+RUN python -c "from diffusers import StableDiffusionInpaintPipeline; StableDiffusionInpaintPipeline.from_pretrained('stabilityai/stable-diffusion-2-inpainting')"
