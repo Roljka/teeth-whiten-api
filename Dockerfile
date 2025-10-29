@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-# Sistēmas bibliotēkas OpenCV/Diffusers vajadzībām
+# OpenCV un diffusers vajadzīgās sistēmas bibliotēkas
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
@@ -8,15 +8,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY . .
 
-# Ja gribi: pip jaunākais
+# Kešu mapes (lai nesprāgst diska kvota un paātrina startu)
+ENV HF_HOME=/tmp/hf
+ENV TRANSFORMERS_CACHE=/tmp/hf
+ENV MPLCONFIGDIR=/tmp/mpl
+
 RUN pip install --upgrade pip
 RUN pip install -r requirements.txt
 
-# Cache uz /tmp, lai nesprāgst diska kvotas
-ENV TRANSFORMERS_CACHE=/tmp/hf
-ENV HF_HOME=/tmp/hf
+# Izvēles solis: pre-cache modeli build laikā (ātrākam pirmajam startam)
+# Ja Free plāns/metru limits, vari izkomentēt šo rindu.
+RUN python - << 'PY'
+from diffusers import StableDiffusionInpaintPipeline
+StableDiffusionInpaintPipeline.from_pretrained("SG161222/Realistic_Vision_V5.1_inpainting")
+PY
 
-# Noklusētā palaišana (pielāgo Render “Start Command”, ja vēlies)
-CMD gunicorn -w 1 -k gthread --threads 4 --timeout 180 --bind 0.0.0.0:10000 teeth_api:app
-# Kešot modeli build laikā
-RUN python -c "from diffusers import StableDiffusionInpaintPipeline; StableDiffusionInpaintPipeline.from_pretrained('stabilityai/stable-diffusion-2-inpainting')"
+# Startēšana
+CMD gunicorn -w 1 -k gthread --threads 4 --timeout 300 --bind 0.0.0.0:10000 teeth_api:app
