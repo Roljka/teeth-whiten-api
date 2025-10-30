@@ -3,3 +3,5 @@ flask-cors==5.0.0
 openai==1.51.0
 pillow==10.4.0
 gunicorn==23.0.0
+# FIX: openai 1.5x vēl prasa httpx ar proxies atbalstu
+httpx==0.27.2
