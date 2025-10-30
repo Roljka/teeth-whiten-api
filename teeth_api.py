@@ -19,6 +19,10 @@ face_mesh = mp_face_mesh.FaceMesh(
     min_detection_confidence=0.5
 )
 
+# cik daudz zobu pikseļu uzskatām par "ok" (ja zem šī – slēdzam adaptīvo režīmu)
+MIN_TEETH_PX_RATIO = 0.22   # 22% no mutes iekšpuses
+MIN_TEETH_PX_ABS = 350      # vai vismaz tik pikseļus
+
 # ---------- Palīgfunkcijas ----------
 def pil_to_bgr(pil_img: Image.Image) -> np.ndarray:
     rgb = pil_img.convert("RGB")
@@ -34,7 +38,7 @@ def load_image_fix_orientation(file_storage, max_side=1600) -> np.ndarray:
     return pil_to_bgr(img)
 
 def enhance_for_detection(bgr: np.ndarray) -> np.ndarray:
-    """neliels izgaismojums tikai detekcijai"""
+    """Maigs izgaismojums tikai detekcijai."""
     gamma = 1.1
     inv_gamma = 1.0 / gamma
     table = (np.arange(256) / 255.0) ** inv_gamma * 255
@@ -70,7 +74,7 @@ def shrink_mask(mask: np.ndarray, px: int) -> np.ndarray:
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(1, 2*px+1), max(1, 2*px+1)))
     return cv2.erode(mask, k, iterations=1)
 
-def expand_teeth_sideways(teeth_mask: np.ndarray, mouth_inner: np.ndarray, px: int = 9) -> np.ndarray:
+def expand_teeth_sideways(teeth_mask: np.ndarray, mouth_inner: np.ndarray, px: int = 11) -> np.ndarray:
     """izplešam horizontāli, bet tikai mutes iekšpusē"""
     if px <= 0:
         return teeth_mask
@@ -80,79 +84,120 @@ def expand_teeth_sideways(teeth_mask: np.ndarray, mouth_inner: np.ndarray, px: i
     out[(dil > 0) & (mouth_inner > 0)] = 255
     return out
 
-def add_nearby_dark_teeth(base_mask: np.ndarray, loose_mask: np.ndarray, max_dist: int = 18) -> np.ndarray:
-    """
-    Pievienojam "tumšākos" zobus tikai tad, ja tie ir pietiekami tuvu bāzes zobiem.
-    Izmanto distance transform, lai neaizietu smaganās.
-    """
-    if np.count_nonzero(loose_mask) == 0 or np.count_nonzero(base_mask) == 0:
-        return base_mask
+def keep_top_components(mask: np.ndarray, max_components: int = 2) -> np.ndarray:
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if num_labels <= 1:
+        return mask
+    areas = []
+    for i in range(1, num_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        areas.append((area, i))
+    areas.sort(reverse=True)
+    keep = [idx for (_, idx) in areas[:max_components]]
+    filt = np.zeros_like(mask)
+    for i in keep:
+        filt[labels == i] = 255
+    return filt
 
-    # distance transform – cik tālu katrs pikselis ir no bāzes zobiem
-    inv = cv2.distanceTransform(255 - base_mask, cv2.DIST_L2, 3)
-    add = (loose_mask > 0) & (inv < max_dist)
-    out = base_mask.copy()
-    out[add] = 255
-    return out
-
-def build_teeth_mask(bgr: np.ndarray, lips_mask: np.ndarray) -> np.ndarray:
+def hsv_teeth_mask(bgr: np.ndarray, mouth_inner: np.ndarray) -> np.ndarray:
     """
-    3-pakāpju maska:
-      1) base – drošie, gaišie zobi
-      2) loose – tumšāki zobi mutes iekšpusē
-      3) loose pievienoti tikai, ja atrodas netālu no base
-      4) horizontāla izplešana
+    Ātrais variants – strādā labā gaismā.
     """
     h, w = bgr.shape[:2]
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     H, S, V = cv2.split(hsv)
 
-    # mutes iekšpuse
-    mouth_inner = shrink_mask(lips_mask, px=max(1, min(h, w)//300))
+    # nedaudz pielaidīgs
+    cand = (S < 105) & (V > 135) & (mouth_inner > 0)
 
-    # --- 1) Drošā maska (tas, kas tev darbojās jau tagad)
-    base_cand = (S < 90) & (V > 145) & (mouth_inner > 0)
+    # izmetam sarkanos
     red_like = (((H <= 12) | (H >= 170)) & (S > 30))
-    base_cand = base_cand & (~red_like)
+    cand = cand & (~red_like)
 
-    base = np.zeros((h, w), np.uint8)
-    base[base_cand] = 255
+    mask = np.zeros((h, w), np.uint8)
+    mask[cand] = 255
 
     k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    base = cv2.morphologyEx(base, cv2.MORPH_OPEN, k3, iterations=1)
-    base = cv2.morphologyEx(base, cv2.MORPH_CLOSE, k3, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k3, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k3, iterations=1)
 
-    # saglabājam top-2 komponentes no bāzes
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(base, connectivity=8)
-    if num_labels > 1:
-        areas = []
-        for i in range(1, num_labels):
-            area = stats[i, cv2.CC_STAT_AREA]
-            areas.append((area, i))
-        areas.sort(reverse=True)
-        keep = [idx for (_, idx) in areas[:2]]
-        filt = np.zeros_like(base)
-        for i in keep:
-            filt[labels == i] = 255
-        base = filt
+    return mask
 
-    # --- 2) “Loose” maska – tumšāki zobi mutes iekšienē
-    loose_cand = (S < 130) & (V > 110) & (mouth_inner > 0)
-    loose_cand = loose_cand & (~red_like)
-    loose = np.zeros((h, w), np.uint8)
-    loose[loose_cand] = 255
-    loose = cv2.morphologyEx(loose, cv2.MORPH_OPEN, k3, iterations=1)
+def adaptive_teeth_mask(bgr: np.ndarray, mouth_inner: np.ndarray) -> np.ndarray:
+    """
+    Fallback sliktai gaismai:
+      - skatāmies tikai mutes iekšienē
+      - paņemam gaišāko daļu no tās (percentile)
+      - atmetam sarkanos
+    """
+    h, w = bgr.shape[:2]
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    L, A, B = cv2.split(lab)
 
-    # --- 3) Pievienojam tikai tos loose, kas ir tuvu base
-    teeth = add_nearby_dark_teeth(base, loose, max_dist=20)
+    mouth_idx = mouth_inner > 0
+    if np.count_nonzero(mouth_idx) < 50:
+        # nav mutes?
+        return np.zeros((h, w), np.uint8)
 
-    # --- 4) Izplešam horizontāli, lai paņem abus stūrus
-    teeth = expand_teeth_sideways(teeth, mouth_inner, px=11)
+    Lm = L[mouth_idx].astype(np.float32)
+    Bm = B[mouth_idx].astype(np.float32)
 
-    # papildus neliela izlīdzināšana
-    teeth = cv2.morphologyEx(teeth, cv2.MORPH_CLOSE, k3, iterations=1)
+    # slieksni izvēlamies relatīvi – augšējie 40% pēc gaišuma
+    thr_L = np.percentile(Lm, 60)  # ja tumša bilde – šis būs zemāks
+    # izmetam dzeltenīgo / siltu (smaganas) – pēc b kanāla
+    thr_B = np.percentile(Bm, 85)  # siltākajiem (smaganām) b būs lielāks
 
-    return teeth
+    cand = (L > thr_L) & (B < thr_B + 5) & mouth_idx
+
+    mask = np.zeros((h, w), np.uint8)
+    mask[cand] = 255
+
+    k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k3, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k3, iterations=1)
+    return mask
+
+def build_teeth_mask(bgr: np.ndarray, lips_mask: np.ndarray) -> np.ndarray:
+    """
+    Galvenā maskas būvēšana:
+      1) mutes iekšpuse
+      2) mēģinām HSV
+      3) ja HSV par maz – adaptīvais režīms
+      4) saglabājam lielākos gabalus
+      5) izplešam horizontāli, lai paņem arī sānu zobus
+    """
+    h, w = bgr.shape[:2]
+    mouth_inner = shrink_mask(lips_mask, px=max(1, min(h, w)//300))
+
+    # 1) Mēģinām HSV
+    mask_hsv = hsv_teeth_mask(bgr, mouth_inner)
+
+    mouth_px = np.count_nonzero(mouth_inner)
+    hsv_px = np.count_nonzero(mask_hsv)
+
+    need_adaptive = False
+    if hsv_px < MIN_TEETH_PX_ABS:
+        need_adaptive = True
+    elif mouth_px > 0 and (hsv_px / float(mouth_px)) < MIN_TEETH_PX_RATIO:
+        need_adaptive = True
+
+    if not need_adaptive:
+        mask = mask_hsv
+    else:
+        # 2) adaptīvais – sliktai gaismai
+        mask = adaptive_teeth_mask(bgr, mouth_inner)
+
+    # 3) saglabājam augšējos/apakšējos
+    mask = keep_top_components(mask, max_components=2)
+
+    # 4) izplešam horizontāli, lai paņem sānos
+    mask = expand_teeth_sideways(mask, mouth_inner, px=11)
+
+    # 5) neliels close, lai nav caurumi
+    k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k3, iterations=1)
+
+    return mask
 
 def whiten_only_teeth(bgr: np.ndarray, teeth_mask: np.ndarray,
                       l_gain: int = 14, b_shift: int = 22) -> np.ndarray:
@@ -185,8 +230,10 @@ def whiten():
         bgr = load_image_fix_orientation(request.files["file"])
         h, w = bgr.shape[:2]
 
+        # gaišā kopija tikai detekcijai
         bgr_for_detect = enhance_for_detection(bgr.copy())
 
+        # face mesh
         res = face_mesh.process(cv2.cvtColor(bgr_for_detect, cv2.COLOR_BGR2RGB))
         if not res.multi_face_landmarks:
             return jsonify(error="Face not found"), 422
@@ -194,8 +241,10 @@ def whiten():
         landmarks = res.multi_face_landmarks[0].landmark
         lips_mask = lips_mask_from_landmarks(h, w, landmarks)
 
+        # zobu maska ar adaptīvo fallback
         teeth_mask = build_teeth_mask(bgr_for_detect, lips_mask)
 
+        # balinām tikai masku, uz oriģināla
         out = whiten_only_teeth(bgr, teeth_mask, l_gain=14, b_shift=22)
 
         ok, buf = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
