@@ -10,7 +10,7 @@ import mediapipe as mp
 app = Flask(__name__)
 CORS(app)
 
-# ---------- Mediapipe FaceMesh ----------
+# ---------- Mediapipe ----------
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(
     static_image_mode=True,
@@ -19,11 +19,10 @@ face_mesh = mp_face_mesh.FaceMesh(
     min_detection_confidence=0.5
 )
 
-# ja maska aizpilda mazāk par šo, slēdzam nākamo līmeni
-MIN_RATIO_OK = 0.30   # 30% no mutes
+# cik daudz mutes mums jāaizpilda, lai teiktu "ok"
+MIN_RATIO_OK = 0.30   # 30% no mutes iekšpuses
 MIN_PX_OK = 350
 
-# ---------- Palīgfunkcijas ----------
 def load_image_fix_orientation(file_storage, max_side=1600) -> np.ndarray:
     img = Image.open(file_storage.stream)
     img = ImageOps.exif_transpose(img)
@@ -71,13 +70,11 @@ def shrink_mask(mask: np.ndarray, px: int) -> np.ndarray:
     return cv2.erode(mask, k, iterations=1)
 
 def expand_hv(mask: np.ndarray, mouth_inner: np.ndarray, hx: int = 20, vy: int = 5) -> np.ndarray:
-    """Spēcīgi izplešamies pa x (līdz pašiem sāniem), un mazliet pa y, bet tikai mutes iekšpusē."""
+    """spēcīgi izplešam pa x un mazliet pa y, bet tikai mutes iekšpusē"""
     kx = cv2.getStructuringElement(cv2.MORPH_RECT, (hx, 3))
     mx = cv2.dilate(mask, kx, iterations=1)
-
     ky = cv2.getStructuringElement(cv2.MORPH_RECT, (3, vy))
     mxy = cv2.dilate(mx, ky, iterations=1)
-
     out = np.zeros_like(mask)
     out[(mxy > 0) & (mouth_inner > 0)] = 255
     return out
@@ -96,7 +93,7 @@ def keep_top_components(mask: np.ndarray, n: int = 2) -> np.ndarray:
         out[labels == i] = 255
     return out
 
-# ---------- 1. līmenis: HSV ----------
+# ---------- 1) HSV līmenis ----------
 def teeth_mask_hsv(bgr: np.ndarray, mouth_inner: np.ndarray) -> np.ndarray:
     h, w = bgr.shape[:2]
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -114,12 +111,8 @@ def teeth_mask_hsv(bgr: np.ndarray, mouth_inner: np.ndarray) -> np.ndarray:
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k3, iterations=1)
     return mask
 
-# ---------- 2. līmenis: adaptīvais KREISĀ/LABĀ puse ----------
+# ---------- 2) adaptīvais pa pusēm ----------
 def teeth_mask_adaptive_sided(bgr: np.ndarray, mouth_inner: np.ndarray) -> np.ndarray:
-    """
-    Tā vietā, lai rēķinātu slieksni visai mutei, rēķinām atsevišķi kreisajai/labajai pusei.
-    Tas atrisina tavu “viena puse gaiša, otra tumša” problēmu.
-    """
     h, w = bgr.shape[:2]
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
     L, A, B = cv2.split(lab)
@@ -128,7 +121,6 @@ def teeth_mask_adaptive_sided(bgr: np.ndarray, mouth_inner: np.ndarray) -> np.nd
     if np.count_nonzero(idx) < 80:
         return np.zeros((h, w), np.uint8)
 
-    # atrodam mutes centru
     ys, xs = np.where(idx)
     x_min, x_max = xs.min(), xs.max()
     x_mid = (x_min + x_max) // 2
@@ -137,9 +129,9 @@ def teeth_mask_adaptive_sided(bgr: np.ndarray, mouth_inner: np.ndarray) -> np.nd
 
     for side in ("left", "right"):
         if side == "left":
-            side_mask = (idx) & (np.arange(w)[None, :] <= x_mid)
+            side_mask = idx & (np.arange(w)[None, :] <= x_mid)
         else:
-            side_mask = (idx) & (np.arange(w)[None, :] >= x_mid)
+            side_mask = idx & (np.arange(w)[None, :] >= x_mid)
 
         if np.count_nonzero(side_mask) < 30:
             continue
@@ -147,8 +139,8 @@ def teeth_mask_adaptive_sided(bgr: np.ndarray, mouth_inner: np.ndarray) -> np.nd
         Ls = L[side_mask].astype(np.float32)
         Bs = B[side_mask].astype(np.float32)
 
-        thr_L = np.percentile(Ls, 58)     # cik gaišus ķeram šajā pusē
-        thr_B = np.percentile(Bs, 88)     # cik siltus izmetam šajā pusē
+        thr_L = np.percentile(Ls, 58)
+        thr_B = np.percentile(Bs, 88)
 
         cand = (L > thr_L) & (B < thr_B + 6) & side_mask
         mask[cand] = 255
@@ -158,7 +150,7 @@ def teeth_mask_adaptive_sided(bgr: np.ndarray, mouth_inner: np.ndarray) -> np.nd
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k3, iterations=1)
     return mask
 
-# ---------- 3. līmenis: brutālais ----------
+# ---------- 3) brutālais ----------
 def teeth_mask_brutal(mouth_inner: np.ndarray) -> np.ndarray:
     h, w = mouth_inner.shape[:2]
     ys, xs = np.where(mouth_inner > 0)
@@ -166,24 +158,101 @@ def teeth_mask_brutal(mouth_inner: np.ndarray) -> np.ndarray:
         return np.zeros_like(mouth_inner)
     y_min, y_max = ys.min(), ys.max()
     mouth_h = y_max - y_min + 1
-
     band_h = int(mouth_h * 0.45)
     yc = (y_min + y_max) // 2
     y1 = max(y_min, yc - band_h // 2)
     y2 = min(y_max, yc + band_h // 2)
-
     m = np.zeros_like(mouth_inner)
     m[y1:y2, :] = mouth_inner[y1:y2, :]
-
     k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     m = cv2.erode(m, k3, iterations=1)
     return m
+
+# ---------- simetrizācija tumšajai pusei ----------
+def symmetrize_if_unbalanced(mask: np.ndarray, mouth_inner: np.ndarray) -> np.ndarray:
+    """
+    Ja viena mutes pusei ir ļoooti maz zobu, bet otrai daudz → pārnesam
+    “bagāto” pusi uz “nabaga” pusi ar spoguļošanu.
+    """
+    h, w = mask.shape[:2]
+    ys, xs = np.where(mouth_inner > 0)
+    if xs.size == 0:
+        return mask
+    x_min, x_max = xs.min(), xs.max()
+    x_mid = (x_min + x_max) // 2
+
+    left = mask[:, x_min:x_mid+1]
+    right = mask[:, x_mid:x_max+1]
+
+    left_count = np.count_nonzero(left)
+    right_count = np.count_nonzero(right)
+
+    # ja abas plus mīnus līdzīgas – neko nedaram
+    if left_count == 0 and right_count == 0:
+        return mask
+
+    imbalance = False
+    copy_left_to_right = False
+    copy_right_to_left = False
+
+    if left_count < right_count * 0.25:
+        imbalance = True
+        copy_right_to_left = True
+    elif right_count < left_count * 0.25:
+        imbalance = True
+        copy_left_to_right = True
+
+    if not imbalance:
+        return mask
+
+    new_mask = mask.copy()
+    if copy_right_to_left and right_count > 0:
+        mirrored = np.fliplr(right)
+        # ievietojam kreisajā zonā, bet AND ar mouth_inner
+        tgt = new_mask[:, x_min:x_min+mirrored.shape[1]]
+        mouth_tgt = mouth_inner[:, x_min:x_min+mirrored.shape[1]]
+        tgt[(mirrored > 0) & (mouth_tgt > 0)] = 255
+        new_mask[:, x_min:x_min+mirrored.shape[1]] = tgt
+    elif copy_left_to_right and left_count > 0:
+        mirrored = np.fliplr(left)
+        tgt = new_mask[:, x_max-mirrored.shape[1]+1:x_max+1]
+        mouth_tgt = mouth_inner[:, x_max-mirrored.shape[1]+1:x_max+1]
+        tgt[(mirrored > 0) & (mouth_tgt > 0)] = 255
+        new_mask[:, x_max-mirrored.shape[1]+1:x_max+1] = tgt
+
+    return new_mask
+
+# ---------- pēdējais sānu “outside” ----------
+def allow_small_outside(mask: np.ndarray, mouth_inner: np.ndarray, px: int = 6) -> np.ndarray:
+    """
+    Ļaujam 5–6 px ārpus mutes, bet tikai tajā zobu joslā.
+    Tas paņem pēdējo sānu zobu, kas bieži stāv pašā mutes stūrī.
+    """
+    if px <= 0:
+        return mask
+    h, w = mask.shape[:2]
+    # atrodam aktīvo zobu joslu
+    ys, xs = np.where(mask > 0)
+    if ys.size == 0:
+        return mask
+    y_min, y_max = ys.min(), ys.max()
+    band = np.zeros_like(mask)
+    band[y_min:y_max+1, :] = 1
+
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (px, 3))
+    dil = cv2.dilate(mask, k, iterations=1)
+
+    out = mask.copy()
+    # atļaujam tur, kur ir josla, pat ja nav mouth_inner
+    extra = (dil > 0) & (band > 0)
+    out[extra] = 255
+    return out
 
 def build_teeth_mask(bgr: np.ndarray, lips_mask: np.ndarray) -> np.ndarray:
     h, w = bgr.shape[:2]
     mouth_inner = shrink_mask(lips_mask, px=max(1, min(h, w)//300))
 
-    # 1) mēģinām HSV
+    # 1) HSV
     mask1 = teeth_mask_hsv(bgr, mouth_inner)
     mouth_px = np.count_nonzero(mouth_inner)
     m1_px = np.count_nonzero(mask1)
@@ -191,22 +260,28 @@ def build_teeth_mask(bgr: np.ndarray, lips_mask: np.ndarray) -> np.ndarray:
     if mouth_px > 0 and (m1_px >= MIN_PX_OK or m1_px / mouth_px >= MIN_RATIO_OK):
         mask = mask1
     else:
-        # 2) mēģinām adaptīvo – BET sadalītu pa pusēm
+        # 2) adaptīvais pa pusēm
         mask2 = teeth_mask_adaptive_sided(bgr, mouth_inner)
         m2_px = np.count_nonzero(mask2)
         if mouth_px > 0 and (m2_px >= MIN_PX_OK or m2_px / mouth_px >= MIN_RATIO_OK):
             mask = mask2
         else:
-            # 3) pēdējais – brutālais
+            # 3) brutālais
             mask = teeth_mask_brutal(mouth_inner)
 
-    # saglabājam 2 lielākos laukumus
+    # 4) noturam 2 lielākos
     mask = keep_top_components(mask, n=2)
 
-    # TE galvenais jaunums – agresīvā izplešana (līdz pašiem stūriem)
+    # 5) izplešam līdz stūriem
     mask = expand_hv(mask, mouth_inner, hx=20, vy=5)
 
-    # neliels close, lai nav caurumi
+    # 6) ja viena puse “tukša” – simetrizējam
+    mask = symmetrize_if_unbalanced(mask, mouth_inner)
+
+    # 7) atļaujam vēl 5–6 px ārpus mutes, lai paņem pēdējo zobu
+    mask = allow_small_outside(mask, mouth_inner, px=6)
+
+    # 8) neliels close
     k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k3, iterations=1)
 
@@ -244,10 +319,8 @@ def whiten():
         bgr = load_image_fix_orientation(request.files["file"])
         h, w = bgr.shape[:2]
 
-        # mazliet izgaismojam tikai detekcijai
         bgr_for_detect = enhance_for_detection(bgr.copy())
 
-        # face mesh
         res = face_mesh.process(cv2.cvtColor(bgr_for_detect, cv2.COLOR_BGR2RGB))
         if not res.multi_face_landmarks:
             return jsonify(error="Face not found"), 422
