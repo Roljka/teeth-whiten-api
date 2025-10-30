@@ -5,127 +5,131 @@ import base64
 import numpy as np
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-from PIL import Image, ImageOps, ImageDraw, ImageFilter
+from PIL import Image, ImageOps, ImageFilter
+
 from openai import OpenAI
 
 app = Flask(__name__)
 CORS(app)
 
-# ==== PARAMETRI ====
-AI_SIZE = 768          # mazāks nekā 1024 -> lētāk
-DELTA_L = 14           # cik stipri balinām
-DELTA_B = -14          # cik ļoti noņemam dzeltenumu
-FEATHER = 3            # malas nedaudz mīkstas
-MOUTH_Y_MIN = 0.45     # mute nevar būt augstāk par šo
-MOUTH_Y_MAX = 0.9      # mute nevar būt zemāk par šo
-BOX_MIN_W = 0.12       # lai nav mega šaurs
-BOX_MAX_W = 0.55       # lai nepaņem visu seju
-BOX_MAX_H = 0.20
+# ===== konfigurācija =====
+AI_SIZE = 512           # mazāks = lētāk
+DELTA_L = 14            # balināšanas stiprums (L kanāls)
+DELTA_B = -14           # mazāk dzeltenuma
+FEATHER = 2             # maskas mīkstināšana
+MOUTH_TOP = 0.58        # pēc rotācijas – kur sākas mutes josla
+MOUTH_BOTTOM = 0.82     # pēc rotācijas – kur beidzas mutes josla
 
-VISION_PROMPT = (
-    "You are a vision model that ONLY detects teeth areas in human face photos. "
-    "Return STRICT JSON ONLY in this exact shape:\n"
-    "{\n"
-    "  \"upper\": {\"x\": <float 0..1>, \"y\": <float 0..1>, \"w\": <float 0..1>, \"h\": <float 0..1>} | null,\n"
-    "  \"lower\": {\"x\": <float 0..1>, \"y\": <float 0..1>, \"w\": <float 0..1>, \"h\": <float 0..1>} | null\n"
-    "}\n"
-    "Rules:\n"
-    "- x,y is top-left corner.\n"
-    "- Values MUST be normalized to [0,1].\n"
-    "- If teeth are closed and not visible, return both as null.\n"
-    "- DO NOT return polygons.\n"
-    "- DO NOT return extra fields.\n"
+ROT_PROMPT = (
+    "You are a vision assistant. Your ONLY job: tell me how much to rotate the image "
+    "CLOCKWISE so that the person's TEETH line (the row of visible teeth) becomes horizontal. "
+    "Return STRICT JSON only, like: {\"angle_deg\": 12.5}\n"
+    "- Positive = rotate clockwise\n"
+    "- Negative = rotate counter-clockwise\n"
+    "- If teeth already horizontal, return {\"angle_deg\": 0}"
 )
 
-# ==== HELPERI ====
 
+# ===== palīgfunkcijas =====
 def exif_to_rgb(img: Image.Image) -> Image.Image:
     return ImageOps.exif_transpose(img).convert("RGB")
 
-def to_square(img: Image.Image, size=AI_SIZE):
-    """Ieliekam bilžu kvadrātā (centrēti), lai AI ir fiksēts izmērs"""
-    w0, h0 = img.size
-    img2 = img.copy()
-    img2.thumbnail((size, size), Image.LANCZOS)
+
+def resize_for_ai(img: Image.Image, size=AI_SIZE) -> Image.Image:
+    img = img.copy()
+    img.thumbnail((size, size), Image.LANCZOS)
     bg = Image.new("RGB", (size, size), (0, 0, 0))
-    ox = (size - img2.width) // 2
-    oy = (size - img2.height) // 2
-    bg.paste(img2, (ox, oy))
-    return bg, (w0, h0), (img2.width, img2.height), (ox, oy)
+    ox = (size - img.width) // 2
+    oy = (size - img.height) // 2
+    bg.paste(img, (ox, oy))
+    return bg
 
-def back_from_square(square_img: Image.Image, orig_size, resized_size, offsets):
-    w0, h0 = orig_size
-    rw, rh = resized_size
-    ox, oy = offsets
-    crop = square_img.crop((ox, oy, ox + rw, oy + rh))
-    return crop.resize((w0, h0), Image.LANCZOS)
 
-def png_bytes(img: Image.Image) -> bytes:
+def pil_to_png_bytes(img: Image.Image) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-def clamp_box(b):
-    """Noliekam AI kasti saprātīgā mutes zonā"""
-    if b is None:
-        return None
-    x = float(b.get("x", 0.0))
-    y = float(b.get("y", 0.0))
-    w = float(b.get("w", 0.0))
-    h = float(b.get("h", 0.0))
 
-    # mutei jābūt noteiktā augstumā
-    if y < MOUTH_Y_MIN:
-        y = MOUTH_Y_MIN
-    if y > MOUTH_Y_MAX:
-        y = MOUTH_Y_MAX - 0.05  # mazliet uz augšu
+def build_teeth_mask_rotated(rot_img: Image.Image) -> Image.Image:
+    """
+    Šī ir mūsu “labākā” lokālā maska, ko tu agrāk redzēji:
+    - skatāmies mutes joslu (MOUTH_TOP..MOUTH_BOTTOM)
+    - ņemam gaišus + mazsātīgus pikseļus
+    - ņemam tikai LIELĀKO komponenti
+    - nedaudz izpludinām
+    Un tagad tas strādā daudz labāk, jo bilde jau ir “taisna”.
+    """
+    w, h = rot_img.size
+    arr = np.array(rot_img).astype(np.uint8)
 
-    # izmērus normalizējam
-    if w < BOX_MIN_W:
-        w = BOX_MIN_W
-    if w > BOX_MAX_W:
-        w = BOX_MAX_W
-    if h <= 0 or h > BOX_MAX_H:
-        h = 0.12  # noklusētais mutes augstums
+    # spilgtums/sātums
+    mx = arr.max(axis=2).astype(np.float32)
+    mn = arr.min(axis=2).astype(np.float32)
+    diff = mx - mn
+    sat = np.zeros_like(mx)
+    nz = mx != 0
+    sat[nz] = (diff[nz] / mx[nz]) * 255.0
 
-    # x robežas
-    if x < 0.15:
-        x = 0.15
-    if x + w > 0.85:
-        x = 0.85 - w
+    y1 = int(h * MOUTH_TOP)
+    y2 = int(h * MOUTH_BOTTOM)
+    x1 = int(w * 0.2)
+    x2 = int(w * 0.8)
 
-    return {"x": x, "y": y, "w": w, "h": h}
+    roi = np.zeros((h, w), dtype=bool)
+    roi[y1:y2, x1:x2] = True
 
-def box_to_mask(box, size=AI_SIZE, feather=FEATHER):
-    """Uzzīmējam no vienas kastes ovālu masku"""
-    mask = Image.new("L", (size, size), 0)
-    if not box:
-        return mask
-    draw = ImageDraw.Draw(mask)
-    x = int(box["x"] * size)
-    y = int(box["y"] * size)
-    w = int(box["w"] * size)
-    h = int(box["h"] * size)
-    # mazliet paplašinām, lai noķer visus zobus
-    pad_w = int(w * 0.08)
-    pad_h = int(h * 0.25)
-    x1 = max(0, x - pad_w)
-    y1 = max(0, y - pad_h)
-    x2 = min(size, x + w + pad_w)
-    y2 = min(size, y + h + pad_h)
-    draw.ellipse([x1, y1, x2, y2], fill=255)
-    if feather > 0:
-        mask = mask.filter(ImageFilter.GaussianBlur(radius=feather))
+    bright = mx > 165
+    low_sat = sat < 85
+
+    prelim = bright & low_sat & roi
+
+    # ja neko neatradām – tukša maska
+    if not prelim.any():
+        return Image.new("L", (w, h), 0)
+
+    # ņemam lielāko komponenti
+    comp = _largest_component(prelim)
+    mask = Image.fromarray((comp * 255).astype(np.uint8), mode="L")
+    if FEATHER > 0:
+        mask = mask.filter(ImageFilter.GaussianBlur(radius=FEATHER))
     return mask
+
+
+def _largest_component(mask_bool: np.ndarray) -> np.ndarray:
+    h, w = mask_bool.shape
+    visited = np.zeros_like(mask_bool, dtype=bool)
+    best = np.zeros_like(mask_bool, dtype=bool)
+    best_size = 0
+
+    for y in range(h):
+        for x in range(w):
+            if not mask_bool[y, x] or visited[y, x]:
+                continue
+            stack = [(y, x)]
+            visited[y, x] = True
+            curr = []
+            while stack:
+                cy, cx = stack.pop()
+                curr.append((cy, cx))
+                for ny, nx in ((cy-1, cx), (cy+1, cx), (cy, cx-1), (cy, cx+1)):
+                    if 0 <= ny < h and 0 <= nx < w and mask_bool[ny, nx] and not visited[ny, nx]:
+                        visited[ny, nx] = True
+                        stack.append((ny, nx))
+            if len(curr) > best_size:
+                best_size = len(curr)
+                best[:] = False
+                for py, px in curr:
+                    best[py, px] = True
+    return best
+
 
 def whiten_lab(img: Image.Image, mask: Image.Image,
                delta_l=DELTA_L, delta_b=DELTA_B) -> Image.Image:
     lab = img.convert("LAB")
     L, A, B = lab.split()
-
     L_np = np.array(L, dtype=np.float32)
     B_np = np.array(B, dtype=np.float32)
-
     M = np.array(mask.resize(img.size, Image.LANCZOS), dtype=np.float32) / 255.0
 
     dL = delta_l * 2.55
@@ -136,118 +140,101 @@ def whiten_lab(img: Image.Image, mask: Image.Image,
 
     L2 = Image.fromarray(L_np.astype(np.uint8), mode="L")
     B2 = Image.fromarray(B_np.astype(np.uint8), mode="L")
-
     out_lab = Image.merge("LAB", (L2, A, B2))
     return out_lab.convert("RGB")
 
-def fallback_mask(square_img: Image.Image) -> Image.Image:
-    """ja AI atnāca ar sviestu – mūsu deterministiskā versija"""
-    w, h = square_img.size
-    arr = np.array(square_img).astype(np.uint8)
-    mx = arr.max(axis=2).astype(np.float32)
-    mn = arr.min(axis=2).astype(np.float32)
-    diff = mx - mn
-    sat = np.zeros_like(mx)
-    nz = mx != 0
-    sat[nz] = (diff[nz] / mx[nz]) * 255.0
 
-    top = int(h * 0.6)
-    bottom = int(h * 0.8)
-    left = int(w * 0.25)
-    right = int(w * 0.75)
+def rotate_keep_canvas(img: Image.Image, angle: float) -> Image.Image:
+    """
+    Rotējam ar expand=True, lai nekas neapgriežas.
+    """
+    return img.rotate(angle, expand=True, resample=Image.BICUBIC)
 
-    bright = mx > 165
-    low_sat = sat < 80
 
-    roi = np.zeros((h, w), dtype=bool)
-    roi[top:bottom, left:right] = True
+def center_crop_to(img: Image.Image, target_size: tuple[int, int]) -> Image.Image:
+    """No lielākas canvasa izgriežam centru uz norādīto izmēru."""
+    tw, th = target_size
+    w, h = img.size
+    left = (w - tw) // 2
+    top = (h - th) // 2
+    return img.crop((left, top, left + tw, top + th))
 
-    mask_bool = bright & low_sat & roi
-    mask = Image.fromarray((mask_bool * 255).astype(np.uint8), mode="L")
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=2))
-    return mask
 
-# ==== MARŠRUTI ====
+# ===== FLASK =====
 
 @app.get("/health")
 def health():
     return jsonify(ok=True)
 
+
 @app.post("/whiten")
 def whiten():
     if "file" not in request.files:
-        return jsonify(error="upload with 'file'"), 400
+        return jsonify(error="upload with field 'file'"), 400
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        return jsonify(error="OPENAI_API_KEY not set"), 500
+        return jsonify(error="OPENAI_API_KEY is not set"), 500
 
     try:
         raw = Image.open(request.files["file"].stream)
-        img = exif_to_rgb(raw)
+        orig = exif_to_rgb(raw)
     except Exception as e:
         return jsonify(error=f"cannot read image: {e}"), 400
 
-    # 1) ieliekam kvadrātā
-    sq, orig_size, resized_size, offsets = to_square(img, AI_SIZE)
-
-    # 2) sagatavojam AI input
-    sq_b64 = base64.b64encode(png_bytes(sq)).decode("utf-8")
+    # 1) sagatavo AI versiju (mazu kvadrātu)
+    ai_img = resize_for_ai(orig, AI_SIZE)
+    ai_b64 = base64.b64encode(pil_to_png_bytes(ai_img)).decode("utf-8")
 
     client = OpenAI(api_key=api_key)
 
     messages = [
-        {"role": "system", "content": VISION_PROMPT},
+        {"role": "system", "content": ROT_PROMPT},
         {
             "role": "user",
             "content": [
                 {"type": "text", "text": "Return JSON only."},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{sq_b64}"}}
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{ai_b64}"}}
             ]
         }
     ]
 
-    upper_box = None
-    lower_box = None
+    angle = 0.0
     try:
-        resp = client.chat.completions.create(
+        r = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
             temperature=0,
-            max_tokens=180,
+            max_tokens=40,
         )
-        txt = resp.choices[0].message.content.strip()
+        txt = r.choices[0].message.content.strip()
         data = json.loads(txt)
-        upper_box = clamp_box(data.get("upper"))
-        lower_box = clamp_box(data.get("lower"))
+        angle = float(data.get("angle_deg", 0.0))
     except Exception:
-        upper_box = None
-        lower_box = None
+        angle = 0.0  # ja nekas nesanāca – balinām kā ir
 
-    # 3) būvējam galīgo masku
-    if upper_box or lower_box:
-        mask = Image.new("L", (AI_SIZE, AI_SIZE), 0)
-        if upper_box:
-            m_up = box_to_mask(upper_box, AI_SIZE, FEATHER)
-            mask = Image.composite(m_up, mask, m_up)
-        if lower_box:
-            m_low = box_to_mask(lower_box, AI_SIZE, FEATHER)
-            mask = Image.composite(m_low, mask, m_low)
-    else:
-        mask = fallback_mask(sq)
+    # 2) pagriežam oriģinālo bildi PRETĒJĀ virzienā (lai zobi būtu horizontāli)
+    rot = rotate_keep_canvas(orig, -angle)
 
-    # 4) balinām lokāli
-    whitened_sq = whiten_lab(sq, mask, DELTA_L, DELTA_B)
+    # 3) uzrotētajā bildē uzbūvējam zobu masku
+    mask_rot = build_teeth_mask_rotated(rot)
 
-    # 5) atgriezamies pie oriģinālā izmēra
-    final_img = back_from_square(whitened_sq, orig_size, resized_size, offsets)
+    # 4) balinām uzrotēto bildi
+    rot_whitened = whiten_lab(rot, mask_rot, DELTA_L, DELTA_B)
+
+    # 5) pagriežam atpakaļ
+    back = rotate_keep_canvas(rot_whitened, angle)
+
+    # 6) izgriežam atpakaļ uz oriģinālo izmēru
+    final_img = center_crop_to(back, orig.size)
 
     return send_file(
-        io.BytesIO(png_bytes(final_img)),
+        io.BytesIO(pil_to_png_bytes(final_img)),
         mimetype="image/png",
         as_attachment=False,
         download_name="whitened.png"
     )
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
