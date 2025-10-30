@@ -12,30 +12,29 @@ CORS(app)
 
 # lētais attēlu modelis
 IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1-mini")
-# lētais vision (lai tikai pateiktu kur ir mute)
+# lētais vision (lai tikai pateiktu, kur ir mute)
 VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
 
 MAX_SIDE = 1024  # uz šo samazinām pirms sūtam
-# cik liels būs ovāls ap muti (kā daļa no kvadrāta)
+
+# ovāla izmērs (normalizēts 0..1) – varēsi pēc tam pievilkt
 MOUTH_RX = 0.21   # horizontālais rādiuss
 MOUTH_RY = 0.14   # vertikālais rādiuss
 
-
 PROMPT_IMAGE = (
     "Whiten ONLY the person's existing natural teeth enamel. "
-    "Do NOT replace or redraw the person. "
-    "Do NOT change lips, skin, beard, eyes, hair or background. "
-    "Keep everything outside the transparent masked area EXACTLY the same. "
-    "Inside the masked area, remove yellow tint and make teeth a bit whiter, natural, realistic. "
-    "If there are no clear teeth in the masked area, make NO change."
+    "Do NOT replace, redraw or regenerate the person, head, eyes, hair, beard or background. "
+    "Do NOT change lips or mouth shape. "
+    "Keep everything OUTSIDE the masked transparent region EXACTLY the same. "
+    "Inside the masked area, remove yellow tint and make the enamel whiter, but natural. "
+    "If there are no teeth in the mask, make NO change."
 )
 
 PROMPT_MOUTH_CENTER = (
     "You will be shown a human face photo. "
     "Return STRICT JSON ONLY with the CENTER of the visible mouth/teeth region. "
     "Format: {\"cx\": <float 0..1>, \"cy\": <float 0..1>} "
-    "cx and cy must be normalized 0..1 relative to image width and height. "
-    "If person is smiling upwards (camera below), still give the mouth center. "
+    "Values must be normalized to [0,1] relative to image width/height. "
     "If you cannot detect a mouth, return {\"cx\": 0.5, \"cy\": 0.7}."
 )
 
@@ -47,9 +46,11 @@ def pil_to_png_bytes(img: Image.Image) -> bytes:
 
 
 def to_square_with_meta(img: Image.Image, size: int = MAX_SIDE):
+    # iztaisnojam pēc EXIF un pārslēdzam uz RGB
     img = ImageOps.exif_transpose(img).convert("RGB")
     w0, h0 = img.size
 
+    # samazinām līdz kvadrātam
     img_copy = img.copy()
     img_copy.thumbnail((size, size), Image.LANCZOS)
 
@@ -71,14 +72,17 @@ def from_square_back(square_img: Image.Image, orig_size, resized_size, offsets):
     return final_img
 
 
-def make_transparent_mask_at(cx: float, cy: float, size: int = MAX_SIDE,
-                             rx: float = MOUTH_RX, ry: float = MOUTH_RY) -> Image.Image:
+def make_transparent_mask_at(
+    cx: float,
+    cy: float,
+    size: int = MAX_SIDE,
+    rx: float = MOUTH_RX,
+    ry: float = MOUTH_RY,
+) -> Image.Image:
     """
-    OpenAI image edit GRIB caurspīdīgo zonu tur, kur jāeditē.
-    Tāpēc taisām RGBA:
-      - viss melns un necaurspīdīgs (0,0,0,255)
-      - ovāls caurspīdīgs  (0,0,0,0)
-    cx, cy, rx, ry ir normalizēti (0..1)
+    Mēs veidojam RGBA masku, kādu grib OpenAI:
+      - melns, necaurspīdīgs = NEDRĪKST mainīt
+      - caurspīdīgs = DRĪKST mainīt
     """
     mask = Image.new("RGBA", (size, size), (0, 0, 0, 255))
     draw = ImageDraw.Draw(mask)
@@ -93,7 +97,7 @@ def make_transparent_mask_at(cx: float, cy: float, size: int = MAX_SIDE,
     x2 = min(size, cx_px + rx_px)
     y2 = min(size, cy_px + ry_px)
 
-    draw.ellipse([x1, y1, x2, y2], fill=(0, 0, 0, 0))  # caurspīdīgais caurums
+    draw.ellipse([x1, y1, x2, y2], fill=(0, 0, 0, 0))
     return mask
 
 
@@ -105,24 +109,25 @@ def health():
 @app.post("/whiten")
 def whiten():
     if "file" not in request.files:
-        return jsonify(error="Upload with field 'file' (multipart/form-data)."), 400
+        return jsonify(error="Upload with field 'file'."), 400
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return jsonify(error="OPENAI_API_KEY is not set"), 500
 
+    # 1) nolasām bildi
     try:
         raw = Image.open(request.files["file"].stream)
     except Exception as e:
         return jsonify(error=f"Cannot read image: {e}"), 400
 
-    # 1) ieliekam kvadrātā
+    # 2) ieliekam kvadrātā, lai vision + image redz vienu un to pašu izmēru
     square_img, orig_size, resized_size, offsets = to_square_with_meta(raw, MAX_SIDE)
     square_png = pil_to_png_bytes(square_img)
 
-    # 2) vision: noskaidrojam mutes centru
     client = OpenAI(api_key=api_key)
 
+    # 3) VISON – dabūnam mutes centru
     b64 = base64.b64encode(square_png).decode("utf-8")
     messages = [
         {"role": "system", "content": PROMPT_MOUTH_CENTER},
@@ -131,33 +136,33 @@ def whiten():
             "content": [
                 {"type": "text", "text": "Return JSON only."},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
-            ]
-        }
+            ],
+        },
     ]
 
-    cx, cy = 0.5, 0.7  # noklusētais, ja AI apmaldās
+    cx, cy = 0.5, 0.7  # noklusētais, ja vision sačakarējas
     try:
-        resp = client.chat.completions.create(
+        vis = client.chat.completions.create(
             model=VISION_MODEL,
             messages=messages,
             temperature=0,
             max_tokens=50,
         )
-        txt = resp.choices[0].message.content.strip()
+        txt = vis.choices[0].message.content.strip()
         data = json.loads(txt)
         cx = float(data.get("cx", 0.5))
         cy = float(data.get("cy", 0.7))
-        # nedaudz noliekam saprātīgās robežās
-        cx = min(max(cx, 0.20), 0.80)
-        cy = min(max(cy, 0.50), 0.90)
+        # notaisnojam robežās, lai nevar aizšaut uz aci
+        cx = min(max(cx, 0.15), 0.85)
+        cy = min(max(cy, 0.50), 0.93)
     except Exception:
-        # ja vision izgāžas – paliek noklusētais
+        # paliek noklusētais (0.5, 0.7)
         pass
 
-    # 3) uztaisa masku TIEŠI tajā vietā, kur AI teica
+    # 4) uztaisām masku tieši tur
     mask_img = make_transparent_mask_at(cx, cy, size=MAX_SIDE)
 
-    # 4) sagatavojam failus ar nosaukumiem (lai nav octet-stream)
+    # 5) sagatavojam failus ar name
     image_file = io.BytesIO(square_png)
     image_file.name = "image.png"
 
@@ -165,13 +170,13 @@ def whiten():
     mask_file = io.BytesIO(mask_bytes)
     mask_file.name = "mask.png"
 
-    # 5) sūtam uz image edit
+    # 6) AI EDIT
     try:
         result = client.images.edit(
             model=IMAGE_MODEL,
             image=image_file,
             mask=mask_file,
-            prompt=PROMPT,
+            prompt=PROMPT_IMAGE,   # <-- te bija problēma, tagad pareizi
             size="1024x1024"
         )
     except Exception as e:
@@ -185,7 +190,7 @@ def whiten():
     edited_bytes = base64.b64decode(out_b64)
     edited_img = Image.open(io.BytesIO(edited_bytes)).convert("RGB")
 
-    # 6) nogriežam atpakaļ uz oriģinālo proporciju
+    # 7) izgriežam tieši to daļu, kur bija tava bilde
     final_img = from_square_back(edited_img, orig_size, resized_size, offsets)
 
     out_bytes = pil_to_png_bytes(final_img)
