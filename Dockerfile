@@ -1,10 +1,14 @@
 FROM python:3.10-slim
 
 WORKDIR /app
+
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt
+
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY teeth_api.py .
 
 ENV PORT=10000
-CMD ["gunicorn","teeth_api:app","--bind","0.0.0.0:10000","--workers","1","--threads","8","--timeout","120"]
+EXPOSE 10000
+
+CMD ["gunicorn", "-w", "1", "-k", "gthread", "-b", "0.0.0.0:10000", "teeth_api:app"]
