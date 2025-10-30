@@ -3,22 +3,22 @@ import io
 import base64
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw
 from openai import OpenAI
 
 app = Flask(__name__)
 CORS(app)
 
 IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1-mini")
-MAX_SIDE = 1024
+MAX_SIDE = 1024  # uz šo liekam kvadrātā
 
 PROMPT = (
-    "Whiten ONLY the person's existing natural teeth enamel. "
-    "Do NOT replace or redraw teeth. "
-    "Do NOT change tooth shape, count, alignment, gums, lips, skin, beard, hair or background. "
-    "Keep overall brightness and contrast unchanged. "
-    "Make a subtle, realistic whitening (1-2 shades). "
-    "If you cannot clearly detect the teeth, make NO changes."
+    "Whiten ONLY the teeth that are visible in this photo. "
+    "Do NOT replace, redraw or regenerate the face, head, eyes, hair, background or lighting. "
+    "Do NOT change lip color or mouth shape. "
+    "Keep the original person exactly the same. "
+    "Inside the masked region, remove yellow tint from the existing teeth enamel and make it whiter, "
+    "but natural and realistic. If there are no clear teeth inside the mask, make NO change."
 )
 
 def pil_to_png_bytes(img: Image.Image) -> bytes:
@@ -49,6 +49,24 @@ def from_square_back(square_img: Image.Image, orig_size, resized_size, offsets):
     final_img = cropped.resize((w0, h0), Image.LANCZOS)
     return final_img
 
+def make_mouth_mask(size=MAX_SIDE,
+                    x_min=0.28, x_max=0.72,
+                    y_min=0.58, y_max=0.80):
+    """
+    Uztaisām L masku (balts = drīkst mainīt) tikai mutes joslai.
+    Koordinātes ir normalizētas (0..1) pret kvadrātu.
+    Vajadzības gadījumā šos skaitļus var pievilkt klāt/vaļā.
+    """
+    mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(mask)
+    x1 = int(x_min * size)
+    y1 = int(y_min * size)
+    x2 = int(x_max * size)
+    y2 = int(y_max * size)
+    # ovāls, nevis kvadrāts -> mazāk ķer lūpas
+    draw.ellipse([x1, y1, x2, y2], fill=255)
+    return mask
+
 @app.get("/health")
 def health():
     return jsonify(ok=True)
@@ -56,7 +74,7 @@ def health():
 @app.post("/whiten")
 def whiten():
     if "file" not in request.files:
-        return jsonify(error="Upload with field 'file' (multipart/form-data)."), 400
+        return jsonify(error="Upload with field 'file'."), 400
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -67,19 +85,28 @@ def whiten():
     except Exception as e:
         return jsonify(error=f"Cannot read image: {e}"), 400
 
+    # 1) ieliekam kvadrātā
     square_img, orig_size, resized_size, offsets = to_square_with_meta(raw, MAX_SIDE)
 
-    # ⇩⇩⇩ ŠEIT BIJA PROBLĒMA ⇩⇩⇩
-    square_png_bytes = pil_to_png_bytes(square_img)
-    image_file = io.BytesIO(square_png_bytes)
-    image_file.name = "image.png"   # <- svarīgi! lai nav application/octet-stream
+    # 2) uztaisām masku tajā pašā izmērā
+    mask_img = make_mouth_mask(size=MAX_SIDE)
+
+    # 3) sagatavojam failus OpenAI (ABIEM jābūt ar name!)
+    img_bytes = pil_to_png_bytes(square_img)
+    img_file = io.BytesIO(img_bytes)
+    img_file.name = "image.png"
+
+    mask_bytes = pil_to_png_bytes(mask_img)
+    mask_file = io.BytesIO(mask_bytes)
+    mask_file.name = "mask.png"
 
     client = OpenAI(api_key=api_key)
 
     try:
         result = client.images.edit(
             model=IMAGE_MODEL,
-            image=image_file,
+            image=img_file,
+            mask=mask_file,
             prompt=PROMPT,
             size="1024x1024"
         )
@@ -94,6 +121,7 @@ def whiten():
     edited_bytes = base64.b64decode(b64)
     edited_img = Image.open(io.BytesIO(edited_bytes)).convert("RGB")
 
+    # 4) nogriežam atpakaļ uz oriģinālo proporciju
     final_img = from_square_back(edited_img, orig_size, resized_size, offsets)
 
     out_bytes = pil_to_png_bytes(final_img)
@@ -103,10 +131,6 @@ def whiten():
         as_attachment=False,
         download_name="whitened.png"
     )
-
-@app.errorhandler(500)
-def handle_500(e):
-    return jsonify(error="Internal server error", detail=str(e)), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
