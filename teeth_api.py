@@ -11,27 +11,33 @@ from openai import OpenAI
 app = Flask(__name__)
 CORS(app)
 
+SIZE = 1024
+
 # cik stipri balinām
-DELTA_L = 14          # +L
-DELTA_B = -14         # -dzeltenais
-FEATHER = 3           # mazs blur, lai nebalina pusi sejas
-SIZE = 1024           # AI redzamais izmērs
+DELTA_L = 14
+DELTA_B = -14
+FEATHER = 3   # neliels blur
+
+# mutes "normālā zona" kvadrātā
+Y_MIN = 0.45   # zem šī nav mute
+Y_MAX = 0.9    # virs šī nav mute
+X_MIN = 0.15   # pa labi/pa kreisi ne pārāk daudz
+X_MAX = 0.85
 
 VISION_PROMPT = (
-    "You are a vision model. Detect the person's VISIBLE TEETH in the image. "
-    "Return STRICT JSON only. "
-    "Format: {\"polygons\":[{\"points\":[[x1,y1],[x2,y2],...]}]} "
-    "Coordinates MUST be normalized floats in range [0,1], relative to image width and height. "
-    "Use 8-20 points per polygon. "
-    "If teeth are slightly open, follow the outer tooth boundary. "
-    "If you are unsure, return an empty list: {\"polygons\":[]}."
+    "You are a vision model. Detect the person's MOUTH/TEETH area in the image. "
+    "Return STRICT JSON ONLY. "
+    "Format: {\"box\": {\"x\": <float>, \"y\": <float>, \"w\": <float>, \"h\": <float>}} "
+    "All values MUST be normalized to [0,1] relative to the image width and height. "
+    "x,y = top-left. "
+    "If you are unsure, return {\"box\": null}."
 )
 
 def exif_to_rgb(img: Image.Image) -> Image.Image:
     return ImageOps.exif_transpose(img).convert("RGB")
 
 def to_square(img: Image.Image, size=SIZE):
-    """ieliekam 1024x1024, piefiksējam kā atgriezties"""
+    """ieliekam 1024x1024, atceramies kā atgriezties"""
     w0, h0 = img.size
     img2 = img.copy()
     img2.thumbnail((size, size), Image.LANCZOS)
@@ -53,35 +59,52 @@ def png_bytes(img: Image.Image) -> bytes:
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-def polygons_to_mask(polygons, size=SIZE, feather=FEATHER):
+def build_ellipse_mask_from_box(box, size=SIZE, feather=FEATHER):
     """
-    polygons: [{'points': [[x,y],...]}] ar x,y 0..1
-    atgriež PIL L masku 0..255
+    box: dict with x,y,w,h normalized
+    uzzīmējam elipsi šajā taisnstūrī
     """
     mask = Image.new("L", (size, size), 0)
     draw = ImageDraw.Draw(mask)
-    drawn = False
-    for poly in polygons:
-        pts = poly.get("points", [])
-        if len(pts) < 3:
-            continue
-        pix = [(int(x * size), int(y * size)) for x, y in pts]
-        draw.polygon(pix, fill=255)
-        drawn = True
-    if not drawn:
-        return Image.new("L", (size, size), 0)
+    x = int(box["x"] * size)
+    y = int(box["y"] * size)
+    w = int(box["w"] * size)
+    h = int(box["h"] * size)
+    draw.ellipse([x, y, x + w, y + h], fill=255)
     if feather > 0:
         mask = mask.filter(ImageFilter.GaussianBlur(radius=feather))
     return mask
 
+def fallback_brightness_mask(square_img: Image.Image) -> Image.Image:
+    """ja AI atnes sviestu – taisām mūsu deterministisko masku ap muti"""
+    w, h = square_img.size
+    arr = np.array(square_img).astype(np.uint8)
+    mx = arr.max(axis=2).astype(np.float32)
+    mn = arr.min(axis=2).astype(np.float32)
+    diff = mx - mn
+    sat = np.zeros_like(mx)
+    nz = mx != 0
+    sat[nz] = (diff[nz] / mx[nz]) * 255.0
+
+    top = int(h * 0.60)
+    bottom = int(h * 0.78)
+    left = int(w * 0.20)
+    right = int(w * 0.80)
+
+    region = np.zeros((h, w), dtype=bool)
+    region[top:bottom, left:right] = True
+
+    bright = mx > 165
+    low_sat = sat < 80
+    prelim = bright & low_sat & region
+    mask = Image.fromarray((prelim * 255).astype(np.uint8), mode="L")
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=2))
+    return mask
+
 def whiten_lab(img: Image.Image, mask: Image.Image,
                delta_l=DELTA_L, delta_b=DELTA_B) -> Image.Image:
-    """
-    lokāla balināšana LAB telpā
-    """
     lab = img.convert("LAB")
     L, A, B = lab.split()
-
     L_np = np.array(L, dtype=np.float32)
     A_np = np.array(A, dtype=np.float32)
     B_np = np.array(B, dtype=np.float32)
@@ -97,9 +120,9 @@ def whiten_lab(img: Image.Image, mask: Image.Image,
     L2 = Image.fromarray(L_np.astype(np.uint8), mode="L")
     B2 = Image.fromarray(B_np.astype(np.uint8), mode="L")
 
-    lab2 = Image.merge("LAB", (L2, A, B2))
-    out = lab2.convert("RGB")
-    return out
+    out_lab = Image.merge("LAB", (L2, A, B2))
+    out_rgb = out_lab.convert("RGB")
+    return out_rgb
 
 @app.get("/health")
 def health():
@@ -120,13 +143,11 @@ def whiten():
     except Exception as e:
         return jsonify(error=f"cannot read image: {e}"), 400
 
-    # 1) normalizējam uz 1024
+    # 1) 1024 kvadrāts
     sq, orig_size, resized_size, offsets = to_square(img, SIZE)
 
-    # 2) sagatavojam bildi visionam
-    sq_bytes = png_bytes(sq)
-    sq_b64 = base64.b64encode(sq_bytes).decode("utf-8")
-
+    # 2) sagatavojam vision input
+    sq_b64 = base64.b64encode(png_bytes(sq)).decode("utf-8")
     client = OpenAI(api_key=api_key)
 
     messages = [
@@ -136,40 +157,64 @@ def whiten():
             "content": [
                 {"type": "text", "text": "Return JSON only."},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{sq_b64}"}}
-            ]
-        }
+            ],
+        },
     ]
 
-    # 3) jautājam tikai koordinātes
+    box = None
     try:
-      vis = client.chat.completions.create(
-          model="gpt-4o-mini",
-          messages=messages,
-          temperature=0,
-          max_tokens=300,
-      )
-      txt = vis.choices[0].message.content.strip()
-      data = json.loads(txt)
-      polygons = data.get("polygons", [])
-    except Exception as e:
-      # ja kaut kas neizdodas – tukša maska → balināšana nenotiek
-      polygons = []
+        vis = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0,
+            max_tokens=120,
+        )
+        txt = vis.choices[0].message.content.strip()
+        data = json.loads(txt)
+        box = data.get("box")
+    except Exception:
+        box = None
 
-    # 4) būvējam masku no koordinātēm
-    mask = polygons_to_mask(polygons, size=SIZE, feather=FEATHER)
+    # 3) validējam box
+    mask = None
+    if box:
+        x = float(box.get("x", 0.0))
+        y = float(box.get("y", 0.0))
+        w = float(box.get("w", 0.0))
+        h = float(box.get("h", 0.0))
 
-    # 5) lokāli balinām
+        # clamp uz mutes zonu
+        # ja AI aizšāvis uz aci – iemetam atpakaļ
+        if y < Y_MIN:
+            y = Y_MIN
+        if y + h > Y_MAX:
+            h = max(0.05, Y_MAX - y)
+        if x < X_MIN:
+            x = X_MIN
+        if x + w > X_MAX:
+            w = max(0.05, X_MAX - x)
+
+        # ja kaste ir pārāk liela (piem., acs+degunam) – metam ārā
+        if h > 0.4 or w > 0.7:
+            mask = None
+        else:
+            mask = build_ellipse_mask_from_box({"x": x, "y": y, "w": w, "h": h}, size=SIZE, feather=FEATHER)
+
+    # ja maska nav – fallback
+    if mask is None:
+        mask = fallback_brightness_mask(sq)
+
+    # 4) balinām lokāli
     whitened_sq = whiten_lab(sq, mask)
 
-    # 6) atgriežam proporciju
+    # 5) atgriežamies pie oriģinālā izmēra
     final_img = back_from_square(whitened_sq, orig_size, resized_size, offsets)
 
-    out_bytes = png_bytes(final_img)
     return send_file(
-        io.BytesIO(out_bytes),
+        io.BytesIO(png_bytes(final_img)),
         mimetype="image/png",
         as_attachment=False,
-        download_name="whitened.png"
+        download_name="whitened.png",
     )
 
 if __name__ == "__main__":
