@@ -1,37 +1,29 @@
-import os
-import io
-import base64
-import json
+import os, io, base64, json
+import numpy as np
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-from PIL import Image, ImageOps, ImageDraw
+from PIL import Image, ImageOps, ImageDraw, ImageFilter
 from openai import OpenAI
 
 app = Flask(__name__)
 CORS(app)
 
-# promti
+# ==== Promti ====
 VISION_PROMPT = (
-    "You are a vision model. Find the person's TEETH in this photo. "
-    "Return STRICT JSON ONLY, no explanation. "
-    "Format: {\"boxes\": [{\"x\": <int>, \"y\": <int>, \"w\": <int>, \"h\": <int>}]}. "
-    "Coordinates are in pixels in the given image resolution. "
-    "x,y is top-left corner. "
-    "Return 1 box if you are unsure. "
-    "If you really cannot find teeth, return {\"boxes\": []}."
+    "You are a vision model. Locate the person's VISIBLE TEETH precisely. "
+    "Return STRICT JSON ONLY, no extra words. "
+    "Format: {\"polygons\":[{\"points\":[[x1,y1],[x2,y2],...]}]} "
+    "Coordinates MUST be NORMALIZED floats in range [0,1] relative to the given image (width,height). "
+    "Use 8-20 points per polygon. If unsure, return an empty list: {\"polygons\":[]}."
 )
 
-WHITEN_PROMPT = (
-    "Lighten ONLY the existing visible teeth in the photo, as specified by the mask. "
-    "Do NOT add, replace or redraw teeth. "
-    "Keep the exact tooth shape, size, spacing and gum line. "
-    "Keep lips, skin, beard and background unchanged. "
-    "Just brighten the enamel 1-2 shades for a natural result, keep texture and translucency. "
-    "If unsure, make no change."
-)
+# cik stipri balinām (vari pielabot pēc gaumes)
+DELTA_L = 12        # gaišāks (0..100 skalai; konvertēsim uz 0..255)
+DELTA_B = -18       # mazāk dzeltenuma (b>0 => dzeltens; mīnuss = uz zilganu)
+FEATHER_PX = 6      # maskas mīkstināšana (px 1024x1024 telpā)
 
+# ==== Palīgfunkcijas ====
 def make_square_1024(img: Image.Image, size: int = 1024) -> Image.Image:
-    """EXIF → RGB → ieliekam 1024x1024 bez izstiepšanas (letterbox)."""
     img = ImageOps.exif_transpose(img).convert("RGB")
     img.thumbnail((size, size), Image.LANCZOS)
     bg = Image.new("RGB", (size, size), (0, 0, 0))
@@ -40,41 +32,67 @@ def make_square_1024(img: Image.Image, size: int = 1024) -> Image.Image:
     return bg
 
 def pil_to_png_bytes(img: Image.Image) -> bytes:
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+    buf = io.BytesIO(); img.save(buf, format="PNG"); return buf.getvalue()
 
 def b64_png(img_bytes: bytes) -> str:
     return base64.b64encode(img_bytes).decode("utf-8")
 
-def build_mask_from_boxes(boxes, size=1024) -> io.BytesIO:
-    """Uztaisām melnu masku ar baltiem zobu laukumiem."""
+def polygons_to_mask(polygons, size=1024, feather=FEATHER_PX) -> Image.Image:
+    """Poligoni NORMALIZĒTĀS koordinātēs (0..1). Atgriež mīkstinātu L masku 0..255."""
     mask = Image.new("L", (size, size), 0)
     draw = ImageDraw.Draw(mask)
-    for b in boxes:
-        x = int(b.get("x", 0))
-        y = int(b.get("y", 0))
-        w = int(b.get("w", 0))
-        h = int(b.get("h", 0))
-        # drošības rezerves, lai ietilpst visi zobi
-        pad_x = int(w * 0.15)
-        pad_y = int(h * 0.25)
-        x1 = max(0, x - pad_x)
-        y1 = max(0, y - pad_y)
-        x2 = min(size, x + w + pad_x)
-        y2 = min(size, y + h + pad_y)
-        draw.rectangle([x1, y1, x2, y2], fill=255)
-    mask_io = io.BytesIO()
-    mask.save(mask_io, format="PNG")
-    mask_io.seek(0)
-    mask_io.name = "mask.png"
-    return mask_io
+    any_drawn = False
+    for poly in polygons:
+        pts = poly.get("points", [])
+        if len(pts) < 3: 
+            continue
+        pix = [(int(x*size), int(y*size)) for x, y in pts]
+        draw.polygon(pix, fill=255)
+        any_drawn = True
+    if not any_drawn:
+        return Image.new("L", (size, size), 0)
+    if feather > 0:
+        mask = mask.filter(ImageFilter.GaussianBlur(radius=feather))
+    return mask
 
+def whiten_in_lab(rgb_img: Image.Image, mask_img: Image.Image,
+                  delta_L=DELTA_L, delta_b=DELTA_B) -> Image.Image:
+    """
+    Krāsu korekcija tikai maskas zonā:
+    - pārejam uz LAB
+    - L palielinām, b samazinām (mazāk dzeltens)
+    - sapludinām ar mīkstu masku
+    """
+    # Pillow LAB kanāli aptuveni 0..255; L ~ spilgtums (0..100 -> 0..255)
+    lab = rgb_img.convert("LAB")
+    L, A, B = lab.split()
 
+    L_np = np.array(L, dtype=np.float32)
+    A_np = np.array(A, dtype=np.float32)
+    B_np = np.array(B, dtype=np.float32)
+
+    mask = mask_img.resize(rgb_img.size, Image.LANCZOS)
+    M = np.array(mask, dtype=np.float32) / 255.0  # 0..1
+
+    # pārrēķinam delta uz 0..255 skalu: 100 -> 255 ~ *2.55
+    dL = float(delta_L) * 2.55
+    dB = float(delta_b) * 2.55
+
+    # pielietojam tikai maskas zonā (alpha-blend – proportional to mask)
+    L_np = np.clip(L_np + dL * M, 0, 255)
+    B_np = np.clip(B_np + dB * M, 0, 255)
+
+    L2 = Image.fromarray(L_np.astype(np.uint8), mode="L")
+    B2 = Image.fromarray(B_np.astype(np.uint8), mode="L")
+
+    lab2 = Image.merge("LAB", (L2, A, B2))
+    out = lab2.convert("RGB")
+    return out
+
+# ==== Maršruti ====
 @app.get("/health")
 def health():
     return jsonify(ok=True)
-
 
 @app.post("/whiten")
 def whiten():
@@ -85,84 +103,49 @@ def whiten():
     if not api_key:
         return jsonify(error="OPENAI_API_KEY is not set on the server."), 500
 
+    # 1) nolasām un normalizējam
     try:
         raw_img = Image.open(request.files["file"].stream)
         img_1024 = make_square_1024(raw_img, 1024)
     except Exception as e:
         return jsonify(error=f"Cannot read image: {e}"), 400
 
-    # šos pašus 1024x1024 izmantosim visur
     png_bytes = pil_to_png_bytes(img_1024)
-    img_io_for_edit = io.BytesIO(png_bytes)
-    img_io_for_edit.name = "image.png"
-
-    # ===== 1) VISION zvans: dabūt zobu kasti =====
-    client = OpenAI(api_key=api_key)
-
-    # padodam bildi kā data-url, lai nav jātur publisks links
     img_b64 = b64_png(png_bytes)
-    vision_messages = [
-        {
-            "role": "system",
-            "content": VISION_PROMPT,
-        },
+
+    # 2) VISION: iegūstam zobu poligonus (normalized 0..1)
+    client = OpenAI(api_key=api_key)
+    messages = [
+        {"role": "system", "content": VISION_PROMPT},
         {
             "role": "user",
             "content": [
-                {
-                    "type": "text",
-                    "text": "Find the teeth and return JSON."
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{img_b64}"
-                    }
-                }
-            ]
-        }
+                {"type": "text", "text": "Return polygons JSON only."},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+            ],
+        },
     ]
 
     try:
-        vision_resp = client.chat.completions.create(
+        vis = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=vision_messages,
-            max_tokens=200,
+            messages=messages,
             temperature=0,
+            max_tokens=250,
         )
-        vision_text = vision_resp.choices[0].message.content.strip()
-        # mēģinām JSON
-        data = json.loads(vision_text)
-        boxes = data.get("boxes", [])
+        txt = vis.choices[0].message.content.strip()
+        data = json.loads(txt)
+        polygons = data.get("polygons", [])
     except Exception:
-        # ja nesanāk – pieņemam 1 kasti sejas vidū (drošs defaults)
-        boxes = [{
-            "x": 1024 // 3,
-            "y": 1024 // 2,
-            "w": 1024 // 3,
-            "h": 1024 // 5,
-        }]
+        # drošs rezerves variants – tukša maska (nekas netiks mainīts)
+        polygons = []
 
-    # uztaisi masku no boxiem
-    mask_io = build_mask_from_boxes(boxes, 1024)
+    # 3) būvējam masku un taisām L*a*b* korekciju lokāli
+    mask = polygons_to_mask(polygons, size=1024, feather=FEATHER_PX)
+    out_img = whiten_in_lab(img_1024, mask, delta_L=DELTA_L, delta_b=DELTA_B)
 
-    # ===== 2) IMAGE EDIT zvans =====
-    try:
-        edit_result = client.images.edit(
-            model="gpt-image-1",
-            image=img_io_for_edit,
-            mask=mask_io,
-            prompt=WHITEN_PROMPT,
-            size="1024x1024",
-        )
-        out_b64 = edit_result.data[0].b64_json
-        out_bytes = base64.b64decode(out_b64)
-    except Exception as e:
-        msg = str(e)
-        if "must be verified to use the model `gpt-image-1`" in msg:
-            return jsonify(error="Your org must be verified for gpt-image-1.", detail=msg), 403
-        return jsonify(error="OpenAI call failed: " + msg), 502
-
+    # 4) atbilde kā PNG
+    out_bytes = pil_to_png_bytes(out_img)
     return send_file(
         io.BytesIO(out_bytes),
         mimetype="image/png",
@@ -170,11 +153,9 @@ def whiten():
         download_name="whitened.png"
     )
 
-
 @app.errorhandler(500)
 def handle_500(e):
     return jsonify(error="Internal server error", detail=str(e)), 500
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
