@@ -7,13 +7,10 @@ from openai import OpenAI
 app = Flask(__name__)
 CORS(app)
 
-# izveidojam klientu vienreiz
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-
 
 @app.get("/health")
 def health():
+    # vienmēr atbildēs, pat ja OPENAI nav uzlikts
     return jsonify(ok=True)
 
 
@@ -33,21 +30,23 @@ def whiten():
     if "file" not in request.files:
         return jsonify(error="Upload with field 'file' (multipart/form-data)."), 400
 
-    if client is None:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
         return jsonify(error="OPENAI_API_KEY is not set on the server."), 500
 
-    # ielasām bildi
+    # IMPORTANT: klientu veidojam ŠEIT, nevis globāli
+    client = OpenAI(api_key=api_key)
+
     img = Image.open(request.files["file"].stream).convert("RGB")
     png_bytes = pil_to_png_bytes(img)
 
-    # te notiek pats edits – PIEVĒRS UZMANĪBU: .edit nevis .edits !
-    # oficiālajos piemēros gpt-image-1 izmanto tieši client.images.edit(...) :contentReference[oaicite:2]{index=2}
+    # .edit (nevis .edits)
     result = client.images.edit(
         model="gpt-image-1",
         image=io.BytesIO(png_bytes),
         prompt=(
-            "Whiten ONLY the visible teeth. Keep lips, gums, skin, hair and background exactly as in the original. "
-            "Natural, realistic whiteness, no glow, no overexposure, no skin smoothing."
+            "Whiten ONLY the visible teeth. Keep lips, gums, skin, hair and background unchanged. "
+            "Natural, realistic result; no halo, no glow, no overexposure."
         ),
         size="1024x1024",
     )
