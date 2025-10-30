@@ -36,25 +36,22 @@ def load_image_fix_orientation(file_storage, max_side=1600) -> np.ndarray:
 def enhance_for_detection(bgr: np.ndarray) -> np.ndarray:
     """
     Maigs izgaismojums tikai analīzei:
-      1) neliels gamma < 1.2
-      2) CLAHE uz L kanāla
-    Gala bildei šo nelietojam – tikai, lai Mediapipe/HSV labāk redzētu muti.
+      1) neliels gamma
+      2) CLAHE uz L
+    Gala bildi nemainām – šo lietojam tikai face/HSV maskas ģenerēšanai.
     """
-    # 1) gamma correction
     gamma = 1.1
     inv_gamma = 1.0 / gamma
     table = (np.arange(256) / 255.0) ** inv_gamma * 255
     table = table.astype("uint8")
     bgr_gamma = cv2.LUT(bgr, table)
 
-    # 2) CLAHE uz L
     lab = cv2.cvtColor(bgr_gamma, cv2.COLOR_BGR2LAB)
     L, A, B = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     L2 = clahe.apply(L)
     lab2 = cv2.merge([L2, A, B])
-    enhanced = cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
-    return enhanced
+    return cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
 
 def lips_mask_from_landmarks(h, w, landmarks) -> np.ndarray:
     """
@@ -86,9 +83,9 @@ def build_teeth_mask(bgr: np.ndarray, lips_mask: np.ndarray) -> np.ndarray:
     """
     Zobu maska tikai mutes iekšpusē:
       1) Mute = lūpu maskas erozēta versija (atvirzāmies no lūpām)
-      2) HSV nosacījumi: zobi parasti ar zemu S un augstu V
-      3) Izgriežam sarkanos toņus (lūpas) pēc H (+ pietiekams S)
-      4) Morfoloģija + noturīgāko laukumu atlase (augšējā/apakšējā zoba josla)
+      2) HSV nosacījumi: zobi ar zemu S un augstu V
+      3) Izgriežam sarkanos toņus (lūpas)
+      4) Morfoloģija + top-2 komponentes
     """
     h, w = bgr.shape[:2]
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -97,10 +94,10 @@ def build_teeth_mask(bgr: np.ndarray, lips_mask: np.ndarray) -> np.ndarray:
     # 1) Mutes iekšpuse – atvirzāmies no lūpu robežas
     mouth_inner = shrink_mask(lips_mask, px=max(1, min(h, w)//300))  # adaptīvi 1–3 px
 
-    # 2) Zobu kandidāti: zems S, augsts V, tikai mutes iekšpusē
+    # 2) Zobu kandidāti
     teeth_cand = (S < 85) & (V > 150) & (mouth_inner > 0)
 
-    # 3) Izgriežam lūpas (sarkans tonis): H ap 0..12 vai 170..180 ar pietiekamu S
+    # 3) Izgriežam lūpas (sarkans tonis)
     red_like = (((H <= 12) | (H >= 170)) & (S > 30))
     teeth_cand = teeth_cand & (~red_like)
 
@@ -114,7 +111,7 @@ def build_teeth_mask(bgr: np.ndarray, lips_mask: np.ndarray) -> np.ndarray:
     mask = cv2.erode(mask, k3, iterations=1)
     mask = cv2.dilate(mask, k3, iterations=1)
 
-    # 5) Saglabājam 2 lielākos komponentus (augšējie/apakšējie zobi)
+    # 5) Top-2 komponentes (augšžoklis/apakšžoklis)
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if num_labels > 1:
         areas = []
@@ -122,7 +119,7 @@ def build_teeth_mask(bgr: np.ndarray, lips_mask: np.ndarray) -> np.ndarray:
             area = stats[i, cv2.CC_STAT_AREA]
             areas.append((area, i))
         areas.sort(reverse=True)
-        keep = [idx for (_, idx) in areas[:2]]  # top-2
+        keep = [idx for (_, idx) in areas[:2]]
         filt = np.zeros_like(mask)
         for i in keep:
             filt[labels == i] = 255
@@ -163,30 +160,29 @@ def whiten():
         if "file" not in request.files:
             return jsonify(error="File missing: use multipart/form-data with field 'file'."), 400
 
-        # 1) Ielasām oriģinālo (to arī balināsim)
+        # Oriģināls (šo arī balināsim)
         bgr = load_image_fix_orientation(request.files["file"])
         h, w = bgr.shape[:2]
 
-        # 2) Uztaisām gaišāku kopiju TIKAI atpazīšanai
+        # Gaišāka kopija tikai detekcijai
         bgr_for_detect = enhance_for_detection(bgr.copy())
 
-        # 3) Face mesh uz uzlabotās bildes
+        # Face mesh uz uzlabotās bildes
         res = face_mesh.process(cv2.cvtColor(bgr_for_detect, cv2.COLOR_BGR2RGB))
         if not res.multi_face_landmarks:
             return jsonify(error="Face not found"), 422
 
         landmarks = res.multi_face_landmarks[0].landmark
 
-        # lūpu maska – pēc izmēra ņemam no oriģinālā h,w
+        # Lūpu maska pēc oriģinālajiem izmēriem
         lips_mask = lips_mask_from_landmarks(h, w, landmarks)
 
-        # 4) Zobu masku būvējam arī no uzlabotās bildes (tur HSV ir stabilāks)
+        # Zobu maska no uzlabotās bildes
         teeth_mask = build_teeth_mask(bgr_for_detect, lips_mask)
 
-        # 5) Balinām tikai maskā, bet uz oriģinālā attēla
+        # Balinām tikai maskā, bet uz oriģināla
         out = whiten_only_teeth(bgr, teeth_mask, l_gain=14, b_shift=22)
 
-        # 6) Kodējam JPEG atmiņā
         ok, buf = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
         if not ok:
             return jsonify(error="Encode failed"), 500
@@ -201,5 +197,4 @@ def whiten():
         return jsonify(error=str(e)), 500
 
 if __name__ == "__main__":
-    # Render parasti dod PORT env
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
