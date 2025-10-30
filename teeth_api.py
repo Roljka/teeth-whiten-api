@@ -1,48 +1,26 @@
 import os
 import io
-import json
 import base64
-import numpy as np
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-from PIL import Image, ImageOps, ImageFilter
-
+from PIL import Image, ImageOps
 from openai import OpenAI
 
 app = Flask(__name__)
 CORS(app)
 
-# ===== konfigurācija =====
-AI_SIZE = 512           # mazāks = lētāk
-DELTA_L = 14            # balināšanas stiprums (L kanāls)
-DELTA_B = -14           # mazāk dzeltenuma
-FEATHER = 2             # maskas mīkstināšana
-MOUTH_TOP = 0.58        # pēc rotācijas – kur sākas mutes josla
-MOUTH_BOTTOM = 0.82     # pēc rotācijas – kur beidzas mutes josla
+# konfigurējams
+IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1-mini")
+MAX_SIDE = 1024  # uz šo liekam kvadrātā pirms sūtam uz OpenAI
 
-ROT_PROMPT = (
-    "You are a vision assistant. Your ONLY job: tell me how much to rotate the image "
-    "CLOCKWISE so that the person's TEETH line (the row of visible teeth) becomes horizontal. "
-    "Return STRICT JSON only, like: {\"angle_deg\": 12.5}\n"
-    "- Positive = rotate clockwise\n"
-    "- Negative = rotate counter-clockwise\n"
-    "- If teeth already horizontal, return {\"angle_deg\": 0}"
+PROMPT = (
+    "Whiten ONLY the person's existing natural teeth enamel. "
+    "Do NOT replace or redraw teeth. "
+    "Do NOT change tooth shape, count, alignment, gums, lips, skin, beard, hair or background. "
+    "Keep overall brightness and contrast unchanged. "
+    "Make a subtle, realistic whitening (1-2 shades). "
+    "If you cannot clearly detect the teeth, make NO changes."
 )
-
-
-# ===== palīgfunkcijas =====
-def exif_to_rgb(img: Image.Image) -> Image.Image:
-    return ImageOps.exif_transpose(img).convert("RGB")
-
-
-def resize_for_ai(img: Image.Image, size=AI_SIZE) -> Image.Image:
-    img = img.copy()
-    img.thumbnail((size, size), Image.LANCZOS)
-    bg = Image.new("RGB", (size, size), (0, 0, 0))
-    ox = (size - img.width) // 2
-    oy = (size - img.height) // 2
-    bg.paste(img, (ox, oy))
-    return bg
 
 
 def pil_to_png_bytes(img: Image.Image) -> bytes:
@@ -51,116 +29,47 @@ def pil_to_png_bytes(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
-def build_teeth_mask_rotated(rot_img: Image.Image) -> Image.Image:
+def to_square_with_meta(img: Image.Image, size: int = MAX_SIDE):
     """
-    Šī ir mūsu “labākā” lokālā maska, ko tu agrāk redzēji:
-    - skatāmies mutes joslu (MOUTH_TOP..MOUTH_BOTTOM)
-    - ņemam gaišus + mazsātīgus pikseļus
-    - ņemam tikai LIELĀKO komponenti
-    - nedaudz izpludinām
-    Un tagad tas strādā daudz labāk, jo bilde jau ir “taisna”.
+    1) iztaisnojam pēc EXIF
+    2) ieliekam 1024×1024 (vai norādīto) centrā – LETTERBOX, nevis izstiepšana
+    3) atgriežam:
+       - square_img: tas, ko sūtam uz OpenAI
+       - orig_size: (w0, h0) – tava sākotnējā bilde
+       - resized_size: (rw, rh) – cik liels fragments tika ielikts kvadrātā
+       - offsets: (ox, oy) – cik no augšas/kreisās ielikts
     """
-    w, h = rot_img.size
-    arr = np.array(rot_img).astype(np.uint8)
+    img = ImageOps.exif_transpose(img).convert("RGB")
+    w0, h0 = img.size
 
-    # spilgtums/sātums
-    mx = arr.max(axis=2).astype(np.float32)
-    mn = arr.min(axis=2).astype(np.float32)
-    diff = mx - mn
-    sat = np.zeros_like(mx)
-    nz = mx != 0
-    sat[nz] = (diff[nz] / mx[nz]) * 255.0
+    # samazinam, lai lielākā mala <= size
+    img_copy = img.copy()
+    img_copy.thumbnail((size, size), Image.LANCZOS)
 
-    y1 = int(h * MOUTH_TOP)
-    y2 = int(h * MOUTH_BOTTOM)
-    x1 = int(w * 0.2)
-    x2 = int(w * 0.8)
+    rw, rh = img_copy.size
+    bg = Image.new("RGB", (size, size), (0, 0, 0))
+    ox = (size - rw) // 2
+    oy = (size - rh) // 2
+    bg.paste(img_copy, (ox, oy))
 
-    roi = np.zeros((h, w), dtype=bool)
-    roi[y1:y2, x1:x2] = True
-
-    bright = mx > 165
-    low_sat = sat < 85
-
-    prelim = bright & low_sat & roi
-
-    # ja neko neatradām – tukša maska
-    if not prelim.any():
-        return Image.new("L", (w, h), 0)
-
-    # ņemam lielāko komponenti
-    comp = _largest_component(prelim)
-    mask = Image.fromarray((comp * 255).astype(np.uint8), mode="L")
-    if FEATHER > 0:
-        mask = mask.filter(ImageFilter.GaussianBlur(radius=FEATHER))
-    return mask
+    return bg, (w0, h0), (rw, rh), (ox, oy)
 
 
-def _largest_component(mask_bool: np.ndarray) -> np.ndarray:
-    h, w = mask_bool.shape
-    visited = np.zeros_like(mask_bool, dtype=bool)
-    best = np.zeros_like(mask_bool, dtype=bool)
-    best_size = 0
-
-    for y in range(h):
-        for x in range(w):
-            if not mask_bool[y, x] or visited[y, x]:
-                continue
-            stack = [(y, x)]
-            visited[y, x] = True
-            curr = []
-            while stack:
-                cy, cx = stack.pop()
-                curr.append((cy, cx))
-                for ny, nx in ((cy-1, cx), (cy+1, cx), (cy, cx-1), (cy, cx+1)):
-                    if 0 <= ny < h and 0 <= nx < w and mask_bool[ny, nx] and not visited[ny, nx]:
-                        visited[ny, nx] = True
-                        stack.append((ny, nx))
-            if len(curr) > best_size:
-                best_size = len(curr)
-                best[:] = False
-                for py, px in curr:
-                    best[py, px] = True
-    return best
-
-
-def whiten_lab(img: Image.Image, mask: Image.Image,
-               delta_l=DELTA_L, delta_b=DELTA_B) -> Image.Image:
-    lab = img.convert("LAB")
-    L, A, B = lab.split()
-    L_np = np.array(L, dtype=np.float32)
-    B_np = np.array(B, dtype=np.float32)
-    M = np.array(mask.resize(img.size, Image.LANCZOS), dtype=np.float32) / 255.0
-
-    dL = delta_l * 2.55
-    dB = delta_b * 2.55
-
-    L_np = np.clip(L_np + dL * M, 0, 255)
-    B_np = np.clip(B_np + dB * M, 0, 255)
-
-    L2 = Image.fromarray(L_np.astype(np.uint8), mode="L")
-    B2 = Image.fromarray(B_np.astype(np.uint8), mode="L")
-    out_lab = Image.merge("LAB", (L2, A, B2))
-    return out_lab.convert("RGB")
-
-
-def rotate_keep_canvas(img: Image.Image, angle: float) -> Image.Image:
+def from_square_back(square_img: Image.Image, orig_size, resized_size, offsets):
     """
-    Rotējam ar expand=True, lai nekas neapgriežas.
+    No 1024×1024 (kur vidū stāv tava bilde) izgriežam ārā tieši to pašu laukumu
+    un uzskalojam atpakaļ uz sākotnējo izmēru – lai frontā abi ir vienādi.
     """
-    return img.rotate(angle, expand=True, resample=Image.BICUBIC)
+    w0, h0 = orig_size
+    rw, rh = resized_size
+    ox, oy = offsets
 
+    # izgriežam laukumu, kur bija sākotnējā bilde
+    cropped = square_img.crop((ox, oy, ox + rw, oy + rh))
+    # un uzliekam atpakaļ sākotnējo izmēru
+    final_img = cropped.resize((w0, h0), Image.LANCZOS)
+    return final_img
 
-def center_crop_to(img: Image.Image, target_size: tuple[int, int]) -> Image.Image:
-    """No lielākas canvasa izgriežam centru uz norādīto izmēru."""
-    tw, th = target_size
-    w, h = img.size
-    left = (w - tw) // 2
-    top = (h - th) // 2
-    return img.crop((left, top, left + tw, top + th))
-
-
-# ===== FLASK =====
 
 @app.get("/health")
 def health():
@@ -169,8 +78,9 @@ def health():
 
 @app.post("/whiten")
 def whiten():
+    # 1) failam ir jābūt
     if "file" not in request.files:
-        return jsonify(error="upload with field 'file'"), 400
+        return jsonify(error="Upload with field 'file' (multipart/form-data)."), 400
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -178,62 +88,51 @@ def whiten():
 
     try:
         raw = Image.open(request.files["file"].stream)
-        orig = exif_to_rgb(raw)
     except Exception as e:
-        return jsonify(error=f"cannot read image: {e}"), 400
+        return jsonify(error=f"Cannot read image: {e}"), 400
 
-    # 1) sagatavo AI versiju (mazu kvadrātu)
-    ai_img = resize_for_ai(orig, AI_SIZE)
-    ai_b64 = base64.b64encode(pil_to_png_bytes(ai_img)).decode("utf-8")
+    # 2) ieliekam kvadrātā un piefiksējam, kā atgriezties
+    square_img, orig_size, resized_size, offsets = to_square_with_meta(raw, MAX_SIDE)
+    square_png = pil_to_png_bytes(square_img)
 
+    # 3) zvanam OpenAI ar lētāko image modeli
     client = OpenAI(api_key=api_key)
 
-    messages = [
-        {"role": "system", "content": ROT_PROMPT},
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "Return JSON only."},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{ai_b64}"}}
-            ]
-        }
-    ]
-
-    angle = 0.0
     try:
-        r = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            temperature=0,
-            max_tokens=40,
+        result = client.images.edit(
+            model=IMAGE_MODEL,         # <- gpt-image-1-mini
+            image=square_png,
+            prompt=PROMPT,
+            size="1024x1024"
         )
-        txt = r.choices[0].message.content.strip()
-        data = json.loads(txt)
-        angle = float(data.get("angle_deg", 0.0))
+    except Exception as e:
+        # ja OpenAI nogāzās – atgriežam skaidru kļūdu, nevis HTML
+        return jsonify(error=f"OpenAI call failed: {str(e)}"), 502
+
+    try:
+        b64 = result.data[0].b64_json
     except Exception:
-        angle = 0.0  # ja nekas nesanāca – balinām kā ir
+        return jsonify(error="OpenAI returned no image data"), 502
 
-    # 2) pagriežam oriģinālo bildi PRETĒJĀ virzienā (lai zobi būtu horizontāli)
-    rot = rotate_keep_canvas(orig, -angle)
+    edited_bytes = base64.b64decode(b64)
+    edited_img = Image.open(io.BytesIO(edited_bytes)).convert("RGB")
 
-    # 3) uzrotētajā bildē uzbūvējam zobu masku
-    mask_rot = build_teeth_mask_rotated(rot)
+    # 4) izgriežam atpakaļ tādu pašu izmēru kā oriģinālam
+    final_img = from_square_back(edited_img, orig_size, resized_size, offsets)
 
-    # 4) balinām uzrotēto bildi
-    rot_whitened = whiten_lab(rot, mask_rot, DELTA_L, DELTA_B)
-
-    # 5) pagriežam atpakaļ
-    back = rotate_keep_canvas(rot_whitened, angle)
-
-    # 6) izgriežam atpakaļ uz oriģinālo izmēru
-    final_img = center_crop_to(back, orig.size)
-
+    # 5) sūtam bildi atpakaļ
+    out_bytes = pil_to_png_bytes(final_img)
     return send_file(
-        io.BytesIO(pil_to_png_bytes(final_img)),
+        io.BytesIO(out_bytes),
         mimetype="image/png",
         as_attachment=False,
         download_name="whitened.png"
     )
+
+
+@app.errorhandler(500)
+def handle_500(e):
+    return jsonify(error="Internal server error", detail=str(e)), 500
 
 
 if __name__ == "__main__":
