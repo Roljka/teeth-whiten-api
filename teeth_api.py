@@ -3,11 +3,21 @@ import io
 import base64
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-from PIL import Image
+from PIL import Image, ImageOps
 from openai import OpenAI
 
 app = Flask(__name__)
 CORS(app)
+
+# stingrais prompts – tikai balinām, neko nepārvelkam
+SOFT_WHITEN_PROMPT = (
+    "Lighten ONLY the existing visible teeth in the photo. "
+    "Do NOT add, replace or redraw teeth. "
+    "Keep the exact tooth shape, size, spacing and gum line. "
+    "Keep lips, skin, beard and background unchanged. "
+    "Just brighten the enamel 1-2 shades for a natural result, keep texture and translucency. "
+    "If unsure, make no change."
+)
 
 
 def pil_to_png_bytes(img: Image.Image) -> bytes:
@@ -28,7 +38,7 @@ def root():
 
 @app.post("/whiten")
 def whiten():
-    # 1) faila lauks
+    # 1) pārbaudām failu
     if "file" not in request.files:
         return jsonify(error="Upload with field 'file' (multipart/form-data)."), 400
 
@@ -36,29 +46,29 @@ def whiten():
     if not api_key:
         return jsonify(error="OPENAI_API_KEY is not set on the server."), 500
 
-    # 2) ielasām bildi
+    # 2) nolasām un iztaisnojam orientāciju
     try:
-        img = Image.open(request.files["file"].stream).convert("RGB")
+        raw_img = Image.open(request.files["file"].stream)
+        # šis pārvērtīs EXIF orientāciju par reāliem pikseļiem
+        img = ImageOps.exif_transpose(raw_img).convert("RGB")
     except Exception as e:
         return jsonify(error=f"Cannot read image: {e}"), 400
 
-    # pārkodējam uz PNG
+    # 3) pārkodējam uz PNG
     png_bytes = pil_to_png_bytes(img)
 
-    # izveidojam "failu" ar nosaukumu, lai openai nesaka application/octet-stream
+    # 4) sataisām faila objektu ar nosaukumu, lai openai nedusmojas par mimetype
     img_file = io.BytesIO(png_bytes)
-    img_file.name = "image.png"  # <-- ŠĪ IR GALVENĀ RINDA
+    img_file.name = "image.png"
 
+    # 5) saucam OpenAI
     try:
         client = OpenAI(api_key=api_key)
 
         result = client.images.edit(
             model="gpt-image-1",
-            image=img_file,  # tagad tas ir "image.png"
-            prompt=(
-                "Whiten ONLY the visible teeth. Keep lips, gums, skin, hair and background unchanged. "
-                "Natural, realistic result; no halo, no glow, no overexposure."
-            ),
+            image=img_file,
+            prompt=SOFT_WHITEN_PROMPT,
             size="1024x1024",
         )
 
@@ -67,12 +77,23 @@ def whiten():
 
     except Exception as e:
         msg = str(e)
+        # tipiskās kļūdas
         if "Incorrect API key provided" in msg or "invalid_api_key" in msg:
             return jsonify(error="OpenAI authentication failed: " + msg), 401
+        if "must be verified to use the model `gpt-image-1`" in msg:
+            return jsonify(
+                error="Your organization must be verified to use gpt-image-1.",
+                detail=msg,
+            ), 403
         if "unsupported_file_mimetype" in msg:
-            return jsonify(error="OpenAI rejected image: unsupported mimetype. We forced PNG but server still refused."), 400
+            return jsonify(
+                error="OpenAI rejected image: unsupported mimetype after PNG conversion.",
+                detail=msg,
+            ), 400
+        # pārējās
         return jsonify(error="OpenAI call failed: " + msg), 502
 
+    # 6) viss ok – sūtām bildi
     return send_file(
         io.BytesIO(out_bytes),
         mimetype="image/png",
