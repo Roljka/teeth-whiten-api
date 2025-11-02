@@ -13,8 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && pip install --upgrade pip \
  && pip install -r requirements.txt \
  && python - <<'PY'
-import cv2
-import mediapipe as mp
+import cv2, mediapipe as mp
 print("cv2+mediapipe OK")
 PY
 
