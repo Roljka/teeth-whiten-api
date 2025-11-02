@@ -1,50 +1,29 @@
 import io
 import os
-import urllib.request
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-
 import mediapipe as mp
-from mediapipe.tasks import python as mp_python
-from mediapipe.tasks.python import vision as mp_vision
 
 app = Flask(__name__)
 CORS(app)
 
-# -------------------------------------------------------
-# 1) MODEĻA FAILS (MediaPipe Face Landmarker)
-# -------------------------------------------------------
-MODEL_PATH = "face_landmarker.task"
-MODEL_URL = (
-    "https://storage.googleapis.com/mediapipe-models/"
-    "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+# ============================================================
+# Mediapipe FaceMesh – VECĀ LABĀ, BEZ DOWNLOAD
+# ============================================================
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(
+    static_image_mode=True,
+    max_num_faces=1,
+    refine_landmarks=False,
+    min_detection_confidence=0.5
 )
 
-def ensure_model():
-    if not os.path.exists(MODEL_PATH):
-        os.makedirs(os.path.dirname(MODEL_PATH) or ".", exist_ok=True)
-        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-
-ensure_model()
-
-# -------------------------------------------------------
-# 2) Iniciējam jauno landmarkeru
-# -------------------------------------------------------
-base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
-landmarker_options = mp_vision.FaceLandmarkerOptions(
-    base_options=base_options,
-    output_face_blendshapes=False,
-    output_facial_transformation_matrixes=False,
-    num_faces=1
-)
-face_landmarker = mp_vision.FaceLandmarker.create_from_options(landmarker_options)
-
-# -------------------------------------------------------
-# Oficiālie mutes punkti
-# -------------------------------------------------------
+# ============================================================
+# Oficiālie mutes punkti (no dokumentācijas bildes)
+# ============================================================
 MOUTH_OUTER = [
     61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291,
     409, 270, 269, 267, 0, 37, 39, 40, 185, 61
@@ -54,13 +33,12 @@ MOUTH_INNER = [
     415, 310, 311, 312, 13, 82, 81, 80, 191, 78
 ]
 
-# sliekšņi
 MIN_RATIO_OK = 0.30
 MIN_PX_OK = 350
 
-# -------------------------------------------------------
+# ============================================================
 # Palīgfunkcijas
-# -------------------------------------------------------
+# ============================================================
 def load_image_fix_orientation(file_storage, max_side=1600) -> np.ndarray:
     img = Image.open(file_storage.stream)
     img = ImageOps.exif_transpose(img)
@@ -72,6 +50,7 @@ def load_image_fix_orientation(file_storage, max_side=1600) -> np.ndarray:
     return cv2.cvtColor(np.array(rgb), cv2.COLOR_RGB2BGR)
 
 def enhance_for_detection(bgr: np.ndarray) -> np.ndarray:
+    # viegla papildu apstrāde, bet bez tīkla pieprasījumiem
     gamma = 1.1
     inv_gamma = 1.0 / gamma
     table = (np.arange(256) / 255.0) ** inv_gamma * 255
@@ -86,6 +65,7 @@ def enhance_for_detection(bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
 
 def lips_mask_from_landmarks_strict(h, w, landmarks) -> np.ndarray:
+    """Mutē izmantojam tieši tos indeksus, ko rādīja MP doks."""
     outer_pts = []
     for idx in MOUTH_OUTER:
         lm = landmarks[idx]
@@ -210,7 +190,6 @@ def teeth_mask_adaptive_sided(bgr: np.ndarray, mouth_inner: np.ndarray) -> np.nd
     x_mid = (x_min + x_max) // 2
 
     mask = np.zeros((h, w), np.uint8)
-
     for side in ("left", "right"):
         side_mask = idx & ((np.arange(w)[None, :] <= x_mid) if side == "left" else (np.arange(w)[None, :] >= x_mid))
         if np.count_nonzero(side_mask) < 30:
@@ -264,16 +243,18 @@ def build_teeth_mask_lowlight(bgr: np.ndarray,
     h, w = bgr.shape[:2]
     mask = mouth_inner.copy()
 
+    # nogriežam zem apakšlūpas
     for x in range(w):
         y_cut = safe_floor[x]
         if y_cut >= 0:
             mask[y_cut+1:h, x] = 0
 
-    # horizontāls paplašinājums – lai aizsniedz pašus sānu zobus
+    # horizontāls reach
     mask = cv2.dilate(mask,
                       cv2.getStructuringElement(cv2.MORPH_RECT, (36, 3)),
                       iterations=1)
 
+    # izmetam smaganas
     gum = light_gum_mask(bgr, mouth_inner)
     mask[gum > 0] = 0
 
@@ -313,7 +294,7 @@ def build_teeth_mask(bgr: np.ndarray, lips_mask: np.ndarray) -> np.ndarray:
 
     base_mask = keep_top_components(base_mask, n=2)
 
-    # horizontāli izplešam
+    # horizontāls paplašinājums
     mouth_wide = cv2.dilate(mouth_inner,
                              cv2.getStructuringElement(cv2.MORPH_RECT, (32, 1)),
                              iterations=1)
@@ -365,9 +346,9 @@ def whiten_only_teeth(bgr: np.ndarray, teeth_mask: np.ndarray,
     out = cv2.cvtColor(cv2.merge([Ln.astype(np.uint8), A, Bn.astype(np.uint8)]), cv2.COLOR_LAB2BGR)
     return out
 
-# -------------------------------------------------------
+# ============================================================
 # endpointi
-# -------------------------------------------------------
+# ============================================================
 @app.route("/health")
 def health():
     return jsonify(ok=True)
@@ -382,13 +363,11 @@ def whiten():
         h, w = bgr.shape[:2]
 
         bgr_for_detect = enhance_for_detection(bgr.copy())
-        rgb = cv2.cvtColor(bgr_for_detect, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        result = face_landmarker.detect(mp_image)
-        if not result.face_landmarks:
+        res = face_mesh.process(cv2.cvtColor(bgr_for_detect, cv2.COLOR_BGR2RGB))
+        if not res.multi_face_landmarks:
             return jsonify(error="Face not found"), 422
 
-        landmarks = result.face_landmarks[0]  # 1 seja
+        landmarks = res.multi_face_landmarks[0].landmark
 
         lips_mask = lips_mask_from_landmarks_strict(h, w, landmarks)
 
