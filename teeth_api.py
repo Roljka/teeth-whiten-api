@@ -50,16 +50,28 @@ def build_ceiling(mask):
         col = ys[xs==x];  ceil[x] = col.min() if col.size else -1
     return ceil
 
-def cut_below(mask,floor,lift_px):
-    h,w = mask.shape; out = mask.copy()
+def cut_below(mask, floor, lift_px):
+    """Nogriez visu ZEM mutes grīdas (grīda + lift_px..h)."""
+    out = mask.copy()
+    h, w = out.shape
     for x in range(w):
-        y=floor[x];  out[y+lift_px:h,x]=0 if y>=0 else out[:,x]
+        y = floor[x]
+        if y >= 0:
+            y1 = min(h, y + lift_px)
+            if y1 < h:
+                out[y1:h, x] = 0
     return out
 
-def cut_above(mask,ceil,shave_px):
-    h,w = mask.shape; out = mask.copy()
+def cut_above(mask, ceiling, shave_px):
+    """Nogriez visu VIRS mutes griestiem (0..griesti+shave_px)."""
+    out = mask.copy()
+    h, w = out.shape
     for x in range(w):
-        y=ceil[x];  out[0:max(0,y+shave_px),x]=0 if y>=0 else out[:,x]
+        y = ceiling[x]
+        if y >= 0:
+            y2 = max(0, min(h, y + shave_px))
+            if y2 > 0:
+                out[0:y2, x] = 0
     return out
 
 def gums_mask(bgr, mouth_mask, top_guard_px=3, loose=False):
