@@ -90,16 +90,15 @@ def build_mouth_safe(bgr, landmarks, lowlight=False):
         safe = inner
     return safe
 
-# ── CLAHE mutē (labāka saderība ēnām) ────────────────────────────────────────
+# ── CLAHE mutē (labāka saderība ēnām) — FIXED ────────────────────────────────
 def clahe_in_mouth(bgr, safe):
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
-    L, A, B = cv2.split(lab)
-    m = safe > 0
-    if np.count_nonzero(m) == 0:
-        return bgr
+    L, A, B = cv2.split(lab)                # uint8, 2D
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    L_eq = clahe.apply(L)                   # pielietojam visam kadrām (2D)
     L2 = L.copy()
-    L2[m] = clahe.apply(L[m])
+    m = safe.astype(bool)
+    L2[m] = L_eq[m]                         # ieblendējam tikai mutē
     out = cv2.cvtColor(cv2.merge([L2, A, B]), cv2.COLOR_LAB2BGR)
     return out
 
@@ -169,12 +168,9 @@ def grow_teeth_lab(bgr, safe, lowlight):
             filled[y, x0:x1+1] = 255
     filled = cv2.bitwise_and(filled, safe)
 
-    # 2) distance close – aizver caurumus
-    dist = cv2.distanceTransform((filled>0).astype(np.uint8), cv2.DIST_L2, 3)
-    filled[dist < 1] = filled[dist < 1]  # noop; saglabā formātu
+    # 2) distance close – aizver caurumus + vertikālais “piespiediens”
     filled = cv2.morphologyEx(filled, cv2.MORPH_CLOSE,
                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,3)), 2)
-    # vertikālais “piespiediens” līdz zobu apakšai/augšai
     ys, xs = np.where(filled>0)
     if xs.size:
         vpush = np.zeros_like(filled)
@@ -184,7 +180,6 @@ def grow_teeth_lab(bgr, safe, lowlight):
             vpush[y0:y1+1, x] = 255
         filled = cv2.bitwise_and(vpush, safe)
 
-    # pēdējais gludums
     filled = cv2.medianBlur(filled, 3)
     return filled
 
@@ -207,7 +202,6 @@ def whiten_lab(bgr, mask, l_gain=14, b_shift=22, a_pull=4):
 # ── Pipeline ─────────────────────────────────────────────────────────────────
 def make_teeth_mask(bgr, landmarks):
     h, w = bgr.shape[:2]
-    # low-light heuristika
     lips = lips_hull_mask(h, w, landmarks)
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     V = hsv[:,:,2]; low = (np.median(V[lips>0]) < 110)
