@@ -198,6 +198,29 @@ def whiten_teeth(bgr, teeth_mask, strength=0.65, blue_fix=0.45):
 
 # ========= Flask app =========
 app = Flask(__name__)
+# CORS – atļaujam no jebkuras izcelsmes (vari nomainīt uz savu domēnu)
+from flask_cors import CORS
+CORS(app,
+     resources={r"/*": {"origins": "*"}},
+     supports_credentials=False,
+     methods=["GET", "POST", "OPTIONS"],
+     allow_headers=["Content-Type", "X-Requested-With"])
+
+# Globāli piešujam CORS headerus (preflight atbildei un visiem citiem)
+@app.after_request
+def add_cors_headers(resp):
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Requested-With"
+    return resp
+
+# Ļaujam preflight /whiten maršrutam (bez loģikas, tikai 204)
+@app.route("/whiten", methods=["OPTIONS"])
+def whiten_options():
+    return ("", 204)
+
+# (pēc vajadzības) lielāku upload limitu
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB
 
 @app.route("/", methods=["GET"])
 def root():
