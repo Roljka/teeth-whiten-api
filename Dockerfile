@@ -2,20 +2,19 @@ FROM python:3.10-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    OMP_NUM_THREADS=1 \
+    NUMEXPR_MAX_THREADS=1
+
+# Fix: libgthread/libGL trūkumi dažās platformās
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 libgl1 && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY requirements.txt .
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
- && rm -rf /var/lib/apt/lists/* \
- && pip install --upgrade pip \
- && pip install -r requirements.txt \
- && python - <<'PY'
-import cv2, mediapipe as mp
-print("cv2+mediapipe OK")
-PY
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY teeth_api.py .
 
