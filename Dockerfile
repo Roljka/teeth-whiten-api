@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Sistēmas bibliotēkas, kas izbeidz "libGL.so.1" bļāvienus
+# Sistēmas libi, kas novāc libGL kļūdas
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
@@ -15,17 +15,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender1 \
     libxext6 \
     ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 
-# Ļoti skaidri: NOMETAM jebkuru opencv (ja atnācis tranzitīvi),
-# un uzliekam tikai headless
-RUN pip install --upgrade pip && \
-    pip uninstall -y opencv-python opencv-contrib-python opencv-python-headless || true && \
-    pip install --no-cache-dir -r requirements.txt && \
-    python - <<'PY'\nimport cv2; print("OpenCV OK:", cv2.__version__)\nPY
+# Nometam jebkuru opencv un instalējam tikai headless versiju
+RUN pip install --upgrade pip \
+  && pip uninstall -y opencv-python opencv-contrib-python opencv-python-headless || true \
+  && pip install --no-cache-dir -r requirements.txt \
+  && python -c "import cv2; print('OpenCV OK:', cv2.__version__)"
 
+# Tava aplikācija
 COPY teeth_api.py .
 
 EXPOSE 10000
