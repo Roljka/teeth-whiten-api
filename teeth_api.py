@@ -1,19 +1,12 @@
-import io
-import os
-import cv2
-import numpy as np
+import io, os, cv2, numpy as np
 from PIL import Image, ImageOps
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import mediapipe as mp
 
-# ──────────────────────────────────────────────────────────────────────────────
-# App
-# ──────────────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 CORS(app)
 
-# Mediapipe FaceMesh – 1 seja, statisks, pietiek ar lūpām
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(
     static_image_mode=True,
@@ -22,9 +15,7 @@ face_mesh = mp_face_mesh.FaceMesh(
     min_detection_confidence=0.5
 )
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Palīgfunkcijas (I/O)
-# ──────────────────────────────────────────────────────────────────────────────
+# ── I/O ───────────────────────────────────────────────────────────────────────
 def pil_to_bgr(pil_img):
     rgb = pil_img.convert("RGB")
     return cv2.cvtColor(np.array(rgb), cv2.COLOR_RGB2BGR)
@@ -38,9 +29,7 @@ def load_image_fix_orientation(file_storage, max_side=1600):
         img = img.resize((int(w*s), int(h*s)), Image.LANCZOS)
     return pil_to_bgr(img)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Mutes zonas veidošana no FaceMesh lūpu punktiem
-# ──────────────────────────────────────────────────────────────────────────────
+# ── Lips / mouth masks ────────────────────────────────────────────────────────
 def lips_hull_mask(h, w, landmarks):
     idx = set()
     for a, b in mp_face_mesh.FACEMESH_LIPS:
@@ -67,89 +56,96 @@ def grow(mask, px):
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*px+1, 2*px+1))
     return cv2.dilate(mask, k, 1)
 
-def build_mouth_masks(bgr, landmarks, lowlight=False):
-    h, w = bgr.shape[:2]
-    lips = lips_hull_mask(h, w, landmarks)
-
-    # “Drošā mute”: lūpu huls + neliela eroze no robežām
-    edge = max(1, min(h, w)//240)     # 1–3 px tipiski
-    safe = shrink(lips, edge)
-
-    # Atmetam rozā (smaganas/lūpas) pēc LAB A kanāla un HSV sarkanā
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
-    L, A, B = cv2.split(lab)
+def hsv_red_like(bgr, a_thresh):
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     H, S, V = cv2.split(hsv)
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    _, A, _ = cv2.split(lab)
+    red = (((H <= 12) | (H >= 170)) & (S > 30)) | (A > a_thresh)
+    out = np.zeros(H.shape, np.uint8); out[red] = 255
+    return out
 
-    red_like = (((H <= 12) | (H >= 170)) & (S > 30)) | (A > (155 if lowlight else 150))
-    lips_color = np.zeros((h, w), np.uint8); lips_color[red_like] = 255
-
-    # safe_mouth = lips iekšpuse bez rozā pikseļiem + neliela aizpilde
-    safe_mouth = cv2.bitwise_and(safe, cv2.bitwise_not(lips_color))
-    safe_mouth = cv2.morphologyEx(safe_mouth, cv2.MORPH_OPEN,
-                                  cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3)), 1)
-    safe_mouth = cv2.morphologyEx(safe_mouth, cv2.MORPH_CLOSE,
-                                  cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,3)), 2)
-
-    # Drošības tīkls – ja paliek par maz, ņemam lips bez krāsas maskas
-    if np.count_nonzero(safe_mouth) < 200:
-        safe_mouth = safe
-
-    return safe_mouth
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Krāsu-līdzības reģionu augsme (LAB) ZOBU maskai
-# ──────────────────────────────────────────────────────────────────────────────
-def teeth_region_grow_lab(bgr, safe_mouth,
-                          k_seeds=250, a_max=155, v_min=95,
-                          wL=1.0, wA=2.2, wB=1.6,
-                          thr_base=14.5, thr_step=0.6, max_iter=2):
-    """
-    Aug reģionu no gaišākajiem “ne-rozā” pikseļiem mutes iekšpusē.
-    Distances telpa: sqrt(wL*dL^2 + wA*dA^2 + wB*dB^2).
-    """
+def build_mouth_safe(bgr, landmarks, lowlight=False):
     h, w = bgr.shape[:2]
-    if np.count_nonzero(safe_mouth) < 200:
-        return np.zeros((h, w), np.uint8)
+    lips = lips_hull_mask(h, w, landmarks)
+    edge = max(1, min(h, w)//240)           # 1–3 px
+    inner = shrink(lips, edge)               # atvirzāmies no lūpu robežas
 
+    # “Dziļā mute” – neliela vertikāla dilācija uz leju (smaida apakša)
+    kdeep = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 5 if lowlight else 4))
+    deep = cv2.dilate(inner, kdeep, 1)
+
+    # izmetam rozā/sarkano
+    red = hsv_red_like(bgr, a_thresh=(160 if lowlight else 155))
+    safe = cv2.bitwise_and(deep, cv2.bitwise_not(red))
+
+    # smooth
+    safe = cv2.morphologyEx(safe, cv2.MORPH_OPEN,
+                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3)), 1)
+    safe = cv2.morphologyEx(safe, cv2.MORPH_CLOSE,
+                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,3)), 2)
+
+    # fallback
+    if np.count_nonzero(safe) < 200:
+        safe = inner
+    return safe
+
+# ── CLAHE mutē (labāka saderība ēnām) ────────────────────────────────────────
+def clahe_in_mouth(bgr, safe):
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    L, A, B = cv2.split(lab)
+    m = safe > 0
+    if np.count_nonzero(m) == 0:
+        return bgr
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    L2 = L.copy()
+    L2[m] = clahe.apply(L[m])
+    out = cv2.cvtColor(cv2.merge([L2, A, B]), cv2.COLOR_LAB2BGR)
+    return out
+
+# ── Region grow + “row fill” + distance-close ────────────────────────────────
+def grow_teeth_lab(bgr, safe, lowlight):
+    h, w = bgr.shape[:2]
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.int16)
     L, A, B = lab[:,:,0], lab[:,:,1], lab[:,:,2]
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     V = hsv[:,:,2]
 
-    m = safe_mouth > 0
-    seeds_mask = (m & (A < a_max) & (V > v_min))
-
-    ys, xs = np.where(seeds_mask)
-    if xs.size == 0:
+    m = safe > 0
+    if np.count_nonzero(m) < 200:
         return np.zeros((h, w), np.uint8)
-    idx = np.argsort(-L[ys, xs])[:k_seeds]  # spilgtākie
+
+    # sēklas: gaišākie, ne-rozā
+    seeds = m & (A < (160 if lowlight else 155)) & (V > (85 if lowlight else 95))
+    ys, xs = np.where(seeds)
+    if xs.size == 0: return np.zeros((h, w), np.uint8)
+    idx = np.argsort(-L[ys, xs])[: (350 if lowlight else 250)]
     sy, sx = ys[idx], xs[idx]
 
-    grown = np.zeros((h, w), np.uint8)
-    grown[sy, sx] = 255
+    grown = np.zeros((h, w), np.uint8); grown[sy, sx] = 255
     queue = list(zip(sy.tolist(), sx.tolist()))
 
-    # Nelaižam cauri asām malām
+    # malas: nelaiž pāri asām robežām (smaganu kontūra)
     g = cv2.Laplacian(cv2.GaussianBlur(L.astype(np.uint8),(3,3),0), cv2.CV_16S)
     g = np.abs(g)
 
+    # sākuma centroids
     L0 = int(np.mean(L[sy, sx])); A0 = int(np.mean(A[sy, sx])); B0 = int(np.mean(B[sy, sx]))
+    wL, wA, wB = 1.0, 2.4, 1.7
+    thr_base = 15.5 if lowlight else 14.5
+    thr_step = 0.9 if lowlight else 0.6
     nbrs = [(-1,0),(1,0),(0,-1),(0,1)]
 
-    for it in range(max_iter):
+    for it in range(3 if lowlight else 2):
         thr = thr_base + it * thr_step
         head = 0
         while head < len(queue):
             y, x = queue[head]; head += 1
             for dy, dx in nbrs:
                 ny, nx = y+dy, x+dx
-                if ny < 0 or ny >= h or nx < 0 or nx >= w:
-                    continue
-                if grown[ny, nx] or not m[ny, nx]:
-                    continue
-                if g[ny, nx] > 60:  # asa mala (smaganu robeža u.tml.)
-                    continue
+                if ny<0 or ny>=h or nx<0 or nx>=w: continue
+                if grown[ny, nx] or not m[ny, nx]: continue
+                if g[ny, nx] > 60: continue
                 dL = int(L[ny, nx]) - L0
                 dA = int(A[ny, nx]) - A0
                 dB = int(B[ny, nx]) - B0
@@ -157,85 +153,42 @@ def teeth_region_grow_lab(bgr, safe_mouth,
                 if dist <= thr:
                     grown[ny, nx] = 255
                     queue.append((ny, nx))
-
         gy, gx = np.where(grown > 0)
         if gy.size > 200:
-            # robustāk pret ēnām – median
             L0 = int(np.median(L[gy, gx]))
             A0 = int(np.median(A[gy, gx]))
             B0 = int(np.median(B[gy, gx]))
 
-    # Nedaudz izlīdzinām
-    grown = cv2.morphologyEx(grown, cv2.MORPH_OPEN,
-                             cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3)), 1)
-    grown = cv2.morphologyEx(grown, cv2.MORPH_CLOSE,
-                             cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,3)), 1)
-    return grown
-
-# “Smaida aizvēršana”: aizpilda atstarpes pa rindām un vertikāli izstiepj
-def fill_rows(mask, safe_mouth):
-    h, w = mask.shape
-    out = np.zeros_like(mask)
-    rows = np.where(np.sum(safe_mouth>0, axis=1) > 0)[0]
-    if rows.size == 0: 
-        return mask
-    y0, y1 = rows[0], rows[-1]
-    for y in range(y0, y1+1):
-        cols = np.where(mask[y]>0)[0]
+    # 1) “row fill” – nepieļaujam pus-zobus
+    filled = np.zeros_like(grown)
+    rows = np.where(np.sum(safe>0, axis=1) > 0)[0]
+    for y in rows:
+        cols = np.where(grown[y]>0)[0]
         if cols.size >= 2:
-            out[y, cols.min():cols.max()+1] = 255
-    return out
+            x0, x1 = cols.min(), cols.max()
+            filled[y, x0:x1+1] = 255
+    filled = cv2.bitwise_and(filled, safe)
 
-def expand_cols_vertical(mask, safe_mouth, up=4, down=6):
-    h, w = mask.shape
-    ys, xs = np.where(mask>0)
-    if xs.size == 0:
-        return mask
-    out = np.zeros_like(mask)
-    for y, x in zip(ys, xs):
-        y0 = max(0, y-up); y1 = min(h-1, y+down)
-        out[y0:y1+1, x] = 255
-    out = cv2.bitwise_and(out, safe_mouth)
-    out = cv2.medianBlur(out, 3)
-    return out
+    # 2) distance close – aizver caurumus
+    dist = cv2.distanceTransform((filled>0).astype(np.uint8), cv2.DIST_L2, 3)
+    filled[dist < 1] = filled[dist < 1]  # noop; saglabā formātu
+    filled = cv2.morphologyEx(filled, cv2.MORPH_CLOSE,
+                              cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,3)), 2)
+    # vertikālais “piespiediens” līdz zobu apakšai/augšai
+    ys, xs = np.where(filled>0)
+    if xs.size:
+        vpush = np.zeros_like(filled)
+        for y, x in zip(ys, xs):
+            y0 = max(0, y-5 if not lowlight else y-6)
+            y1 = min(h-1, y+7 if not lowlight else y+10)
+            vpush[y0:y1+1, x] = 255
+        filled = cv2.bitwise_and(vpush, safe)
 
-# Galvenā zobu maska
-def make_teeth_mask(bgr, landmarks):
-    safe_base = build_mouth_masks(bgr, landmarks, lowlight=False)
-    area = max(1, np.count_nonzero(safe_base))
-    # low-light heuristika
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    V = hsv[:,:,2]; low = (np.median(V[safe_base>0]) < 110)
+    # pēdējais gludums
+    filled = cv2.medianBlur(filled, 3)
+    return filled
 
-    safe = build_mouth_masks(bgr, landmarks, lowlight=low)
-
-    # 0) krāsu-līdzības augsme
-    rg = teeth_region_grow_lab(
-        bgr, safe,
-        k_seeds=(350 if low else 250),
-        a_max=(160 if low else 155),
-        v_min=(85 if low else 95),
-        wL=1.0, wA=2.4, wB=1.7,
-        thr_base=(15.5 if low else 14.5),
-        thr_step=(0.9 if low else 0.6),
-        max_iter=(3 if low else 2)
-    )
-    t = fill_rows(rg, safe)
-    t = expand_cols_vertical(t, safe, up=(5 if low else 3), down=(7 if low else 4))
-    t = cv2.bitwise_and(t, safe)
-    cov = np.count_nonzero(t)/area
-    if cov >= (0.35 if low else 0.36):
-        return t
-
-    # 1) ja nepietiek – atslābinām vertikālo izplešanu, lai “aizsniedz dibenu”
-    t = fill_rows(rg, safe)
-    t = expand_cols_vertical(t, safe, up=(6 if low else 4), down=(10 if low else 6))
-    t = cv2.bitwise_and(t, safe)
-    return t
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Balināšana LAB telpā tikai maskā
-# ──────────────────────────────────────────────────────────────────────────────
+# ── Whiten ───────────────────────────────────────────────────────────────────
 def whiten_lab(bgr, mask, l_gain=14, b_shift=22, a_pull=4):
     if np.count_nonzero(mask) == 0:
         return bgr
@@ -244,17 +197,34 @@ def whiten_lab(bgr, mask, l_gain=14, b_shift=22, a_pull=4):
     m = mask > 0
     L = L.astype(np.int16); A = A.astype(np.int16); B = B.astype(np.int16)
     L[m] = np.clip(L[m] + l_gain, 0, 255)
-    B[m] = np.clip(B[m] - b_shift, 0, 255)   # mazāk dzeltena
-    # mazliet “noņemam” rozā tonējumu zobos
+    B[m] = np.clip(B[m] - b_shift, 0, 255)
     A[m] = np.clip(A[m] - a_pull, 0, 255)
     out = cv2.cvtColor(cv2.merge([L.astype(np.uint8),
                                   A.astype(np.uint8),
                                   B.astype(np.uint8)]), cv2.COLOR_LAB2BGR)
     return out
 
-# ──────────────────────────────────────────────────────────────────────────────
-# API
-# ──────────────────────────────────────────────────────────────────────────────
+# ── Pipeline ─────────────────────────────────────────────────────────────────
+def make_teeth_mask(bgr, landmarks):
+    h, w = bgr.shape[:2]
+    # low-light heuristika
+    lips = lips_hull_mask(h, w, landmarks)
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    V = hsv[:,:,2]; low = (np.median(V[lips>0]) < 110)
+
+    safe = build_mouth_safe(bgr, landmarks, lowlight=low)
+    bgr_eq = clahe_in_mouth(bgr, safe)
+    mask = grow_teeth_lab(bgr_eq, safe, lowlight=low)
+
+    # coverage check; ja pārāk maz – atslābinām
+    area = max(1, np.count_nonzero(safe))
+    cov = np.count_nonzero(mask)/area
+    if cov < (0.35 if low else 0.36):
+        mask = grow_teeth_lab(bgr_eq, grow(safe, 1), lowlight=True)
+
+    return mask
+
+# ── API ──────────────────────────────────────────────────────────────────────
 @app.route("/health")
 def health():
     return jsonify(ok=True)
@@ -266,21 +236,17 @@ def whiten():
             return jsonify(error="File missing: use multipart/form-data field 'file'."), 400
 
         bgr = load_image_fix_orientation(request.files["file"])
-        h, w = bgr.shape[:2]
-
         res = face_mesh.process(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
         if not res.multi_face_landmarks:
             return jsonify(error="Face not found"), 422
 
         landmarks = res.multi_face_landmarks[0].landmark
-
-        teeth_mask = make_teeth_mask(bgr, landmarks)
-        out = whiten_lab(bgr, teeth_mask, l_gain=14, b_shift=22, a_pull=4)
+        mask = make_teeth_mask(bgr, landmarks)
+        out = whiten_lab(bgr, mask, l_gain=14, b_shift=22, a_pull=4)
 
         ok, buf = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
         if not ok:
             return jsonify(error="Encode failed"), 500
-
         return send_file(io.BytesIO(buf.tobytes()),
                          mimetype="image/jpeg",
                          as_attachment=False,
