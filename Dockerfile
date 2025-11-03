@@ -1,32 +1,29 @@
 FROM python:3.10-slim
 
-# Sistēmas bibliotēkas, ko nereti prasa OpenCV/MediaPipe
+# Sistēmas libi, ko prasa OpenCV/Mediapipe
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglib2.0-0 libgomp1 ca-certificates curl \
-    libgl1 libsm6 libxrender1 libxext6 \
+    libgl1 libglib2.0-0 libgomp1 ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY requirements.txt .
+# 1) Uzinstalējam requirements
+# 2) Ja kaut kas atvelk "opencv-python"/"opencv-contrib-python" → izmetam
+# 3) Piespiežam tieši headless buildu (bez deps), lai vienmēr ir cv2
 RUN pip install --no-cache-dir -r requirements.txt \
- # ja kāds transitive atnes "opencv-python", brutāli izmetam:
  && pip uninstall -y opencv-python opencv-contrib-python || true \
- # early-fail, ja kaut kas trūkst:
- && python - <<'PY'
-import cv2, sys
-print("OpenCV:", cv2.__version__)
-PY
+ && pip install --no-cache-dir --force-reinstall --no-deps opencv-python-headless==4.8.1.78
 
 COPY teeth_api.py .
 
 ENV PORT=10000 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    OPENCV_LOG_LEVEL=ERROR
+    PYTHONUNBUFFERED=1
 
 EXPOSE 10000
 
+# (nav obligāts, bet ērti Renderam)
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD \
   curl -fsS http://127.0.0.1:${PORT}/health || exit 1
 
