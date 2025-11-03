@@ -1,22 +1,27 @@
 FROM python:3.10-slim
 
-# OpenCV runtime libi (novāc libGL/libgthread kļūdas)
+# Mazās runtime atkarības mediapipe/opencv (bez libGL)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 libglib2.0-0 \
-  && rm -rf /var/lib/apt/lists/*
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    OMP_NUM_THREADS=1 \
-    NUMEXPR_MAX_THREADS=1
+    libglib2.0-0 libgomp1 ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
+# Tavs API fails:
 COPY teeth_api.py .
 
+ENV PORT=10000 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 EXPOSE 10000
-CMD ["gunicorn", "-w", "1", "-k", "gthread", "--threads", "4", "--timeout", "180", "-b", "0.0.0.0:10000", "teeth_api:app"]
+
+# Vienkāršs healthcheck (nav obligāts, vari mest ārā)
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD \
+  curl -fsS http://127.0.0.1:${PORT}/health || exit 1
+
+# Startēšana ar Gunicorn (gthread ir ideāli šim API)
+CMD ["gunicorn", "-w", "1", "-k", "gthread", "--threads", "4", "--timeout", "120", "-b", "0.0.0.0:10000", "teeth_api:app"]
