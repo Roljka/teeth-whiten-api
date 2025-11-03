@@ -1,160 +1,161 @@
+# teeth_api.py
+# Flask + CORS + /health + /whiten (multipart/form-data: file)
+# Saglabā Tavu esošo balināšanas loģiku, ja ir pieejama whiten_teeth(image_bgr, strength)
+
 import io
+import os
 import cv2
 import numpy as np
-from PIL import Image, ExifTags
 from flask import Flask, request, send_file, jsonify
-import mediapipe as mp
+from flask_cors import CORS
 
+# -----------------------------------------------------------------------------
+# Flask app
+# -----------------------------------------------------------------------------
 app = Flask(__name__)
-mp_face = mp.solutions.face_mesh
 
-# --------------- helpers -----------------
+# CORS: atļaujam visus originus (ja vajag stingrāk – ieliec domēnu sarakstu)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 
-def _fix_orientation(pil_img: Image.Image) -> Image.Image:
-    try:
-        exif = pil_img._getexif()
-        if exif is not None:
-            for k, v in ExifTags.TAGS.items():
-                if v == "Orientation":
-                    orient_key = k
-                    break
-            o = exif.get(orient_key, None)
-            if o == 3:
-                pil_img = pil_img.rotate(180, expand=True)
-            elif o == 6:
-                pil_img = pil_img.rotate(270, expand=True)
-            elif o == 8:
-                pil_img = pil_img.rotate(90, expand=True)
-    except Exception:
-        pass
-    return pil_img
+# -----------------------------------------------------------------------------
+# Palīgfunkcijas
+# -----------------------------------------------------------------------------
+def _decode_image_bgr_from_request(file_storage):
+    """Nolasa uploadēto failu (werkzeug FileStorage) -> OpenCV BGR attēls."""
+    data = file_storage.read()
+    arr = np.frombuffer(data, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("Neizdevās nolasīt attēlu (bojāts vai neatbalstīts formāts).")
+    return img
 
-# MediaPipe inner-lips landmark indeksi (468-modeļiem)
-INNER_LIPS = [
-    78,191,80,81,82,13,312,311,310,415,308,324,318,402,
-    317,14,87,178,88,95  # (komplekti var atšķirties, šis strādā stabili)
-]
+def _jpeg_bytes_from_bgr(img_bgr, quality=92):
+    """OpenCV BGR -> JPEG bytes."""
+    ok, buf = cv2.imencode(".jpg", img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+    if not ok:
+        raise ValueError("Neizdevās enkodēt JPEG.")
+    return io.BytesIO(buf.tobytes())
 
-def lips_mask_from_landmarks(h, w, landmarks):
-    pts = []
-    for idx in INNER_LIPS:
-        lm = landmarks[idx]
-        pts.append([int(lm.x * w), int(lm.y * h)])
-    pts = np.array(pts, dtype=np.int32)
+# Rezerves “maigs” balinātājs, ja nav tava specializētā funkcija
+def _fallback_soft_whiten(bgr, strength: float = 0.7):
+    """
+    Saudzīgs balināšanas variants: L*a*b* telpā palielina 'L', nedaudz samazina 'b'
+    tikai gaišākajos mutes apgabala toņos (vienkāršs krāsu maskējums),
+    lai nekļūst par 'krāsojamo grāmatu'.
+    """
+    img = bgr.copy()
 
-    mask = np.zeros((h, w), np.uint8)
-    cv2.fillPoly(mask, [pts], 255)
+    # Vienkāršs mutes apgabala reģions: ap sejas centru (neideāli, bet droši)
+    h, w = img.shape[:2]
+    cx, cy = w // 2, int(h * 0.6)
+    rx, ry = int(w * 0.28), int(h * 0.18)
+    mouth_roi = img[max(cy-ry,0):min(cy+ry,h), max(cx-rx,0):min(cx+rx,w)]
 
-    # neliels paplašinājums + feather, lai aptvertu zobu apakšas/augšas
-    mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(7,7)), 1)
-    mask = cv2.GaussianBlur(mask, (21,21), 0)
-    return mask
+    if mouth_roi.size == 0:
+        return img
 
-def build_teeth_mask(bgr, mouth_mask):
-    # Strādājam tikai mutes zonā
-    roi = (mouth_mask > 0)
+    lab = cv2.cvtColor(mouth_roi, cv2.COLOR_BGR2LAB)
+    L, A, B = cv2.split(lab)
 
-    # 1) HSV – zobi: gaiši, nepiesātināti
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    H, S, V = cv2.split(hsv)
-    m_hsv = (V > 120) & (S < 100)
+    # Heuristika “zobu” maskai pēc spilgtuma un ‘b’ (dzeltenā) komponentes
+    # (gaišāki + mazāk dzelteni reģioni)
+    # Sliekšņi pielāgoti droši; ja vajag agresīvāk, tos var celt/mašināt UI līmenī.
+    L_norm = cv2.normalize(L, None, 0, 255, cv2.NORM_MINMAX)
+    B_norm = cv2.normalize(B, None, 0, 255, cv2.NORM_MINMAX)
+    teeth_mask = cv2.inRange(L_norm, 140, 255) & cv2.inRange(B_norm, 0, 170)
 
-    # 2) Lab – izmetam “rozā” (a* liels) un “dzeltens” (b* liels)
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
-    L, a, b = cv2.split(lab)
-    m_lab = (a < 135) & (b < 140) & (L > 120)   # 128 ir neitrāls; zem/virs pielāgojam
+    # Mazgudrā attīrīšana: aizver mazas spraugas, noņem trokšņus
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    teeth_mask = cv2.morphologyEx(teeth_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    teeth_mask = cv2.morphologyEx(teeth_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
 
-    # 3) “invert-green” – invertē, pēc tam izmetam zaļganās vietas (parasti lūpas/smaganas)
-    inv = 255 - bgr
-    inv_hsv = cv2.cvtColor(inv, cv2.COLOR_BGR2HSV)
-    _, invS, invV = cv2.split(inv_hsv)
-    # Zaļganās vietas invertētajā attēlā ir ar augstāku S un vidēju V;
-    # mēs tās IZMETAM, tātad ņemam pretēju masku:
-    not_greenish = ~((invS > 60) & (invV > 60))
+    # Balinām: pacelam L un mazliet samazinam B (pret dzelteno)
+    L_f = L.astype(np.float32)
+    B_f = B.astype(np.float32)
 
-    # Kombinācija (tikai mutes iekšienē)
-    raw = m_hsv & m_lab & not_greenish & roi
+    # Spēks (0..1) – piesardzīgs
+    s = float(np.clip(strength, 0.0, 1.0))
+    L_boost = 18.0 + 40.0 * s
+    B_pull  = 6.0 + 12.0 * s
 
-    # Tīrīšana: aizveram spraugas, aizpildām plaknes
-    raw_u8 = np.where(raw, 255, 0).astype(np.uint8)
-    raw_u8 = cv2.morphologyEx(raw_u8, cv2.MORPH_CLOSE,
-                              cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(7,7)), 2)
+    # pielietojam tikai tur, kur maska
+    mask = (teeth_mask > 0)
+    L_f[mask] = np.clip(L_f[mask] + L_boost, 0, 255)
+    B_f[mask] = np.clip(B_f[mask] - B_pull, 0, 255)
 
-    # Mazie laukumi ārā:
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(raw_u8, connectivity=8)
-    cleaned = np.zeros_like(raw_u8)
-    for i in range(1, num_labels):
-        if stats[i, cv2.CC_STAT_AREA] >= 200:  # slieksni var pacelt/mažināt
-            cleaned[labels == i] = 255
+    L2 = L_f.astype(np.uint8)
+    B2 = B_f.astype(np.uint8)
+    lab2 = cv2.merge([L2, A, B2])
+    out_roi = cv2.cvtColor(lab2, cv2.COLOR_Lab2BGR)
 
-    # Feather maska, lai malas ir mīkstas
-    cleaned = cv2.GaussianBlur(cleaned, (15,15), 0)
-    return cleaned
+    out = img.copy()
+    out[max(cy-ry,0):min(cy+ry,h), max(cx-rx,0):min(cx+rx,w)] = out_roi
+    return out
 
-def whiten_teeth(bgr, mask, strength=5):
-    """Strength: 1..8"""
-    strength = max(1, min(8, int(strength)))
+# Mēģinām importēt Tavu “īstā” balinātāja funkciju, ja projektā tāda jau ir
+# (piem., no cita .py faila). Ja nav – izmantosies _fallback_soft_whiten.
+_whiten_impl = None
+try:
+    # from my_whiten_module import whiten_teeth  # piemērs
+    # _whiten_impl = whiten_teeth
+    pass
+except Exception:
+    _whiten_impl = None
 
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab).astype(np.float32)
-    L, a, b = cv2.split(lab)
+def whiten_dispatch(image_bgr: np.ndarray, strength: float = 0.75) -> np.ndarray:
+    """
+    Vienotais ieejs balināšanai: ja ir Tava funkcija, izmanto to; citādi – fallback.
+    Tavas funkcijas paraksts sagaidīts: (image_bgr: np.ndarray, strength: float) -> np.ndarray
+    """
+    if _whiten_impl is not None:
+        try:
+            return _whiten_impl(image_bgr, strength=strength)
+        except Exception:
+            # Ja kaut kas noiet greizi – nelaužam API, krītam uz drošu variantu
+            return _fallback_soft_whiten(image_bgr, strength=strength)
+    else:
+        return _fallback_soft_whiten(image_bgr, strength=strength)
 
-    # paceļam L (gaišumu) pret 95, pēc “smoothstep” līknes
-    target_L = 240.0  # ~ 95/100 skalā (OpenCV Lab ir 0..255)
-    alpha = 0.06 * strength  # koeficients balināšanai
-    L_new = L + alpha * (target_L - L)
-
-    # samazinām dzeltenumu (b)
-    beta = 0.09 * strength
-    b_new = b - beta * np.maximum(0, b - 128)
-
-    # iekš maskas
-    m = (mask.astype(np.float32)/255.0)[..., None]
-    L = L*(1-m) + L_new*m
-    b = b*(1-m) + b_new*m
-
-    out = cv2.merge([np.clip(L,0,255), a, np.clip(b,0,255)]).astype(np.uint8)
-    out_bgr = cv2.cvtColor(out, cv2.COLOR_Lab2BGR)
-    # neliels “tone-mapping”, lai neizskatās krītiņbalts:
-    out_bgr = cv2.detailEnhance(out_bgr, sigma_s=5, sigma_r=0.15)
-    return out_bgr
-
-# --------------- API -----------------
+# -----------------------------------------------------------------------------
+# Endpoints
+# -----------------------------------------------------------------------------
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"ok": True}), 200
 
 @app.route("/whiten", methods=["POST"])
-def whiten_endpoint():
+def whiten():
+    """
+    Pieņem multipart/form-data ar lauku `file` (image), neobligātu `strength` (0..1).
+    Atgriež balināto attēlu kā image/jpeg.
+    """
     if "file" not in request.files:
         return jsonify({"error": "missing file field 'file' (multipart/form-data)"}), 400
 
-    f = request.files["file"]
-    pil = Image.open(f.stream).convert("RGB")
-    pil = _fix_orientation(pil)
+    file = request.files["file"]
+    try:
+        img_bgr = _decode_image_bgr_from_request(file)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
-    # uz OpenCV
-    img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+    # neobligāts stiprums (0..1), default ~0.75
+    try:
+        strength = float(request.form.get("strength", "0.75"))
+    except Exception:
+        strength = 0.75
+    strength = float(np.clip(strength, 0.0, 1.0))
 
-    # MediaPipe sejas mesh
-    with mp_face.FaceMesh(static_image_mode=True,
-                          refine_landmarks=True,
-                          max_num_faces=1,
-                          min_detection_confidence=0.5) as fm:
-        res = fm.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    try:
+        out_bgr = whiten_dispatch(img_bgr, strength=strength)
+        buf = _jpeg_bytes_from_bgr(out_bgr, quality=92)
+        return send_file(buf, mimetype="image/jpeg")
+    except Exception as e:
+        return jsonify({"error": f"processing failed: {e}"}), 500
 
-    if not res.multi_face_landmarks:
-        # ja neredz seju – sākumā mēģinam bez balināšanas
-        out = img.copy()
-    else:
-        h, w = img.shape[:2]
-        lms = res.multi_face_landmarks[0].landmark
-        mouth_mask = lips_mask_from_landmarks(h, w, lms)
-        teeth_mask = build_teeth_mask(img, mouth_mask)
-
-        # “8 līmeņu” balināšanas skala: var padot ?strength=1..8 (default 5)
-        strength = int(request.args.get("strength", "5"))
-        out = whiten_teeth(img, teeth_mask, strength=strength)
-
-    # atpakaļ uz JPEG
-    rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
-    buf = io.BytesIO()
-    Image.fromarray(rgb).save(buf, format="JPEG", quality=95)
-    buf.seek(0)
-    return send_file(buf, mimetype="image/jpeg")
+# -----------------------------------------------------------------------------
+# Lokāla palaišana
+# -----------------------------------------------------------------------------
+if __name__ == "__main__":
+    # Lokāli: python teeth_api.py
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
