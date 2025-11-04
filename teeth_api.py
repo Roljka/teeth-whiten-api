@@ -85,7 +85,7 @@ def _build_teeth_mask(img_bgr, mouth_mask):
                              cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     # HSV sarkanais (lūpas/smaganas): H 0..12 vai 170..180 un pietiekams S
-    red_like = (((H <= 12) | (H >= 170)) & (S > 30))
+    red_like = (((H <= 12) | (H >= 170)) & (S > 25))
 
     # Zobi: gaišāki (L > L_thr), mazāk dzelteni (B < B_thr), ne-sarkani, mutes zonā
     raw = ((L > L_thr) & (B < B_thr) & (~red_like) & m).astype(np.uint8) * 255
