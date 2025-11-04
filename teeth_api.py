@@ -50,9 +50,11 @@ def _build_mouth_mask(img_bgr, landmarks):
     cv2.fillPoly(mask, [inner], 255)
 
     # Mazāka paplašināšana; NEbīdam uz leju (mazāk lūpu paķeršanas)
-    dil = max(8, int(math.sqrt(area) * 0.03))
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil, dil))
-    mask = cv2.dilate(mask, kernel, iterations=1)
+    side = math.sqrt(area)
+kx = max(9, int(side * 0.06)) | 1   # plašāk uz sāniem
+ky = max(5, int(side * 0.025)) | 1  # mazāk vertikāli, lai neuzkāpj uz lūpām
+kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kx, ky))
+mask = cv2.dilate(mask, kernel, iterations=1)
 
     mask = _smooth_mask(mask, 17)
     return mask
@@ -77,12 +79,14 @@ def _build_teeth_mask(img_bgr, mouth_mask):
         return np.zeros_like(mouth_mask)
 
     # --- Otsu sliekšņi tikai mutes zonā ---
-    L_roi = L[m]; B_roi = B[m]
-    # (neliec blur pa 2D – ROI jau ir 1D; Otsu strādās uz histogrammas)
-    L_thr, _ = cv2.threshold(L_roi.astype(np.uint8), 0, 255,
-                             cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    B_thr, _ = cv2.threshold(B_roi.astype(np.uint8), 0, 255,
-                             cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+L_roi = L[m]; B_roi = B[m]
+L_thr, _ = cv2.threshold(L_roi.astype(np.uint8), 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+B_thr, _ = cv2.threshold(B_roi.astype(np.uint8), 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+
+# ↓↓↓ Pievienojam toleranci tumšākiem/dzeltenākiem zobiem
+L_thr = max(40, int(L_thr) - 10)   # atļaujam tumšākus (samazinām L slieksni)
+B_thr = min(200, int(B_thr) + 15)  # atļaujam dzeltenākus (palielinām B slieksni)
+
 
     # HSV sarkanais (lūpas/smaganas): H 0..12 vai 170..180 un pietiekams S
     red_like = (((H <= 12) | (H >= 170)) & (S > 25))
@@ -91,7 +95,7 @@ def _build_teeth_mask(img_bgr, mouth_mask):
     raw = ((L > L_thr) & (B < B_thr) & (~red_like) & m).astype(np.uint8) * 255
 
     # Edge guard: novācam iekšējās malas joslu, lai neskar lūpu malu
-    EDGE_GUARD = 5
+    EDGE_GUARD = 3
     k_guard = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (EDGE_GUARD*2+1, EDGE_GUARD*2+1))
     inner_safe = cv2.erode(mouth_mask, k_guard, iterations=1)
     raw = cv2.bitwise_and(raw, inner_safe)
