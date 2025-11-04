@@ -43,7 +43,6 @@ def _build_mouth_mask(img_bgr, landmarks):
     h, w = img_bgr.shape[:2]
     inner = _landmarks_to_xy(landmarks, w, h, INNER_LIP_IDX)
 
-    # drošībai: ja poligons mazs/sačakarēts, atmet masku
     area = cv2.contourArea(inner)
     if area < 500:
         return np.zeros((h, w), dtype=np.uint8)
@@ -51,20 +50,23 @@ def _build_mouth_mask(img_bgr, landmarks):
     mask = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(mask, [inner], 255)
 
-    # dilatējam, lai ielīstu zem lūpas ēnas un sānu zobos
-    # dilatācijas izmēru balsta uz poligona izmēru
-    dil = max(10, int(math.sqrt(area) * 0.04))
+    # TIGHTER padding
+    pad_k = 0.024   # ← pieliec 0.018..0.030 pēc gaumes (mazāks = tuvāk zobiem)
+    dil = max(6, int(math.sqrt(area) * pad_k))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil, dil))
     mask = cv2.dilate(mask, kernel, iterations=1)
 
-    # noslēpjam virs līnijas: pavelkam uz leju (nekrāso augšlūpu)
-    shift = max(4, dil // 2)
-    M = np.float32([[1, 0, 0], [0, 1, shift]])
-    shifted = cv2.warpAffine(mask, M, (w, h))
-    mask = cv2.max(mask, shifted)
+    # Mazāks vertikālais pabīdiens (vai 0, ja nevajag)
+    shift = max(0, dil // 4)
+    if shift > 0:
+        M = np.float32([[1, 0, 0], [0, 1, shift]])
+        shifted = cv2.warpAffine(mask, M, (w, h))
+        mask = cv2.max(mask, shifted)
 
-    mask = _smooth_mask(mask, 21)
+    # Mazāks feather, lai nebūtu “halo”
+    mask = _smooth_mask(mask, 13)  # 11–15 parasti ir sweet spot
     return mask
+
 
 def _teeth_whiten(img_bgr):
     h, w = img_bgr.shape[:2]
