@@ -29,12 +29,12 @@ INNER_LIP_IDX = np.array(
 # ---------- Noklusētie TUNING ----------
 DEF_DIL_H_SCALE = 0.060   # horizontāli
 DEF_DIL_V_SCALE = 0.025   # vertikāli
-DEF_EDGE_GUARD   = 4      # px
+DEF_EDGE_GUARD   = 6      # px
 DEF_FEATHER_PX   = 15
-DEF_A_MAX        = 148    # LAB A (rozā/sarkans)
+DEF_A_MAX        = 142    # LAB A (rozā/sarkans)
 DEF_RED_H_LOW    = 12     # HSV red
 DEF_RED_H_HIGH   = 170
-DEF_RED_S_MIN    = 28
+DEF_RED_S_MIN    = 36
 DEF_L_DELTA      = -10    # L thr korekcija
 DEF_B_DELTA      = +18    # B thr korekcija
 DEF_MIN_TOOTH_CC = 80
