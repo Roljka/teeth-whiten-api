@@ -24,6 +24,7 @@ INNER_LIP_IDX = np.array([
     78,191,80,81,82,13,312,311,310,415,308,324,318,402,317,14,
     87,178,88,95
 ], dtype=np.int32)
+
 # ---- TUNING PARAMS ----
 DIL_H_SCALE = 0.055   # horizontālā dilatācija (vairāk, lai aizsniegtu sānu zobus)
 DIL_V_SCALE = 0.020   # vertikālā dilatācija (mazāk, lai neuzkāptu uz lūpām)
@@ -38,7 +39,6 @@ BALANCE_A    = 0.15   # A kanāla korekcijas intensitāte (aizvelkam no rozā uz
 YELLOW_REDU  = 0.88   # B kanāla dzeltenuma mazinājums (0.8–0.92)
 L_GAIN       = 0.55   # cik stipri celt L (0.4–0.7) – “dabiskumam”
 L_TARGET     = 235    # pie kā mērķojam augšējo kvartili (230–240)
-
 
 # ---------- Palīgfunkcijas ----------
 def _landmarks_to_xy(landmarks, w, h, idx_list):
@@ -103,10 +103,16 @@ def _build_teeth_mask(img_bgr, mouth_mask):
     H, S, V = cv2.split(hsv)
 
     m = mouth_mask > 0
+
     # --- adaptīvi sliekšņi tikai mutes zonai (stabili arī sliktā gaismā) ---
     L_roi = L[m]; B_roi = B[m]
-    L_thr, _ = cv2.threshold(L_roi.astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    B_thr, _ = cv2.threshold(B_roi.astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # cv2.threshold prasa 2D/attēlu – uztaisām mazu karti
+    L_thr_img = L_roi.reshape(-1, 1).astype(np.uint8)     # FIX: no 1D -> 2D
+    B_thr_img = B_roi.reshape(-1, 1).astype(np.uint8)     # FIX
+    _, L_thr = cv2.threshold(L_thr_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, B_thr = cv2.threshold(B_thr_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    L_thr = int(L_thr)  # skaitlis
+    B_thr = int(B_thr)
 
     # kandidāti: gaiši un nedzelteni
     cand = ((L > L_thr) & (B < B_thr) & m)
@@ -130,7 +136,8 @@ def _build_teeth_mask(img_bgr, mouth_mask):
     raw = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8), 2)
 
     # aizpildām caurumus, lai nav plankumi
-    cnts, _ = cv2.findContours(raw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts = cv2.findContours(raw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
     filled = np.zeros_like(raw)
     for c in cnts:
         if cv2.contourArea(c) > 80:
@@ -141,7 +148,8 @@ def _build_teeth_mask(img_bgr, mouth_mask):
     # kvalitātes kontrole – ja par maz pārklājuma, drošais fallback (mute bez smaganām)
     mouth_area = mouth_mask.sum() / 255.0
     teeth_area = teeth_mask.sum() / 255.0
-    if teeth_area / max(mouth_area, 1.0) < 0.30:
+    ratio = teeth_area / max(mouth_area, 1.0)            # FIX: aizsardzība
+    if ratio < 0.30:
         base = cv2.bitwise_and(mouth_mask, cv2.bitwise_not(gums.astype(np.uint8)*255))
         base = cv2.erode(base, np.ones((3,3), np.uint8), 1)
         base = cv2.morphologyEx(base, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), 1)
@@ -187,19 +195,27 @@ def _teeth_whiten(img_bgr):
         teeth_mask = mouth_mask.copy()
 
     # Feather/clean
-    teeth_mask = cv2.morphologyEx(teeth_mask, cv2.MORPH_CLOSE,
-                                  cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), 1)
+    teeth_mask = cv2.morphologyEx(
+        teeth_mask, cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), 1
+    )
     teeth_mask = cv2.GaussianBlur(teeth_mask, (FEATHER_PX | 1, FEATHER_PX | 1), 0)
     m = teeth_mask > 0
 
     # 3) Normalizējam apgaismojumu iekš maskas (mazāk plankumu sliktā gaismā)
     clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP, tileGridSize=(8, 8))
+    # FIX: CLAHE jālieto uz 2D attēla. Uztaisām pilnam L un pēc tam ieliekam tikai maskā.
+    L_eq_full = clahe.apply(L)         # 2D
     L_eq = L.copy()
-    L_eq[m] = clahe.apply(L[m])
+    L_eq[m] = L_eq_full[m]
 
     # 4) Dabīgs “balinājums”: paceļam L uz mērķi, mazinām B, A tuvojam neitralitātei
-    p95 = np.percentile(L_eq[m], 95) if np.any(m) else 200
-    if p95 < 1: p95 = 1
+    if np.any(m):
+        p95 = np.percentile(L_eq[m], 95)
+    else:
+        p95 = 200
+    if p95 < 1:
+        p95 = 1
     gain = L_GAIN * (L_TARGET / float(p95))
     L_new = L_eq.astype(np.float32)
     L_new[m] = np.clip(L_eq[m] * gain, 0, 255)
@@ -224,7 +240,6 @@ def _teeth_whiten(img_bgr):
     alpha = (teeth_mask.astype(np.float32) / 255.0)[..., None]  # [H,W,1]
     out = (out * (1 - alpha) + smooth * alpha).astype(np.uint8)
     return out
-
 
 def _read_image_from_request():
     # pieņem 'file' VAI 'image'
