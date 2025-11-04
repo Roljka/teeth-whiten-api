@@ -26,7 +26,7 @@ INNER_LIP_IDX = np.array([
 ], dtype=np.int32)
 
 # ---- TUNING PARAMS ----
-DIL_H_SCALE = 0.055   # horizontālā dilatācija (vairāk, lai aizsniegtu sānu zobus)
+DIL_H_SCALE = 0.062   # horizontālā dilatācija (vairāk, lai aizsniegtu sānu zobus)
 DIL_V_SCALE = 0.020   # vertikālā dilatācija (mazāk, lai neuzkāptu uz lūpām)
 SHIFT_DOWN   = 0      # px pabīde lejup no iekš-lūpas (0…2). 0 = turam cieši.
 GUMS_A_MIN   = 150    # LAB A kanāls; > šī vērtība tipiski ir smaganas (rozā/sarkans)
