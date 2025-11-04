@@ -27,30 +27,30 @@ INNER_LIP_IDX = np.array(
 )
 
 # ---------- Noklusētie TUNING ----------
-DEF_DIL_H_SCALE = 0.065   # horizontāli (nedaudz plašāk, bet droši)
-DEF_DIL_V_SCALE = 0.020   # vertikāli (mazāk, lai neuzkāpj uz lūpām)
-DEF_EDGE_GUARD   = 7      # px (lielāka sargjosla no lūpas)
+DEF_DIL_H_SCALE = 0.060   # horizontāli (TAVI)
+DEF_DIL_V_SCALE = 0.025   # vertikāli (TAVI)
+DEF_EDGE_GUARD   = 6      # px (TAVS)
 DEF_FEATHER_PX   = 15
-DEF_A_MAX        = 138    # stingrāk pret smaganām (rozā/sarkans)
-DEF_RED_H_LOW    = 15     # šaurāks “red” logs
-DEF_RED_H_HIGH   = 165
-DEF_RED_S_MIN    = 42     # vajag sarkanāku, lai izkristu
-DEF_L_DELTA      = -14    # atļaujam nedaudz tumšākus
-DEF_B_DELTA      = +26    # atļaujam nedaudz dzeltenākus
+DEF_A_MAX        = 134    # stingrāk pret smaganām (zemāk = vairāk izgriež rozā)
+DEF_RED_H_LOW    = 18     # plašāks red logs, lai izkrīt lūpas/smaganas
+DEF_RED_H_HIGH   = 160
+DEF_RED_S_MIN    = 42     # vajag sarkanāku, lai skaitītos gum/lūpa
+DEF_L_DELTA      = -10    # TAVA vērtība
+DEF_B_DELTA      = +18    # TAVA vērtība
 DEF_MIN_TOOTH_CC = 80
 
 # Mutes maskas pastiepums
-MOUTH_DILATE_KX_SCALE = 0.016  # platāk uz sāniem (drošāk par SIDE_GROW)
-MOUTH_DILATE_KY_SCALE = 0.014  # mazāk vertikāli (neuzkāpj uz lūpām)
-MOUTH_DILATE_ITERS    = 2
-MOUTH_EDGE_GUARD      = 7
-MOUTH_FEATHER_PX      = 15
+MOUTH_DILATE_KX_SCALE = 0.003  # TAVA vērtība (platums)
+MOUTH_DILATE_KY_SCALE = 0.016  # TAVA vērtība
+MOUTH_DILATE_ITERS    = 1      # TAVA vērtība
+MOUTH_EDGE_GUARD      = 6      # TAVA vērtība
+MOUTH_FEATHER_PX      = 15     # TAVA vērtība
 
 # Tumšā gaisma / dzeltenāki zobi
-ALLOW_DARKER_L   = 45    # pietiek zobiem tumšā gaismā, bet nepaceļ smaganas
-ALLOW_YELLO_B    = 40    # atļaujam dzeltenīgākus bez gum-bleed
-SIDE_GROW_PX     = 24    # mazāk agresīva “izplešana” (mazāk ies krāsā uz lūpām)
-RED_SAT_MIN      = 40    # konsekventi ar DEF_RED_S_MIN, lai sarkanais krīt ārā
+ALLOW_DARKER_L   = 60    # TAVA vērtība (ļoti tumši zobi ok)
+ALLOW_YELLO_B    = 60    # TAVA vērtība
+SIDE_GROW_PX     = 40    # TAVA vērtība (paplašina sānos)
+RED_SAT_MIN      = 42    # saskaņots ar DEF_RED_S_MIN
 
 def _getf(name, default):
     v = request.args.get(name)
