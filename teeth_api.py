@@ -47,9 +47,9 @@ MOUTH_EDGE_GUARD      = 6
 MOUTH_FEATHER_PX      = 15
 
 # Tumšā gaisma / dzeltenāki zobi
-ALLOW_DARKER_L   = 40
-ALLOW_YELLO_B    = 40
-SIDE_GROW_PX     = 15
+ALLOW_DARKER_L   = 60
+ALLOW_YELLO_B    = 60
+SIDE_GROW_PX     = 20
 RED_SAT_MIN      = 25
 
 def _getf(name, default):
