@@ -27,37 +27,37 @@ INNER_LIP_IDX = np.array(
 )
 
 # ---------- Noklusētie TUNING ----------
-DEF_DIL_H_SCALE = 0.060
-DEF_DIL_V_SCALE = 0.025
-DEF_EDGE_GUARD   = 10     # agresīvāka atkāpe no lūpas malas
+DEF_DIL_H_SCALE = 0.060   # horizontāli
+DEF_DIL_V_SCALE = 0.025   # vertikāli
+DEF_EDGE_GUARD   = 4      # ↓ mazāka atkāpe, lai apakša nesalūzt
 DEF_FEATHER_PX   = 15
-DEF_A_MAX        = 112     # ĻOTI zems: gandrīz viss rozā/sarkans tiks izmests
-DEF_RED_H_LOW    = 45      # plašāks “red” logs (0..45 vai 135..180)
-DEF_RED_H_HIGH   = 135
-DEF_RED_S_MIN    = 65      # jābūt ļoti piesātinātam, lai paliktu maskā
-DEF_L_DELTA      = -10
-DEF_B_DELTA      = +18
+DEF_A_MAX        = 142    # A < 142 vēl joprojām skaitām kā “ne smaganas”
+DEF_RED_H_LOW    = 12
+DEF_RED_H_HIGH   = 170
+DEF_RED_S_MIN    = 36
+DEF_L_DELTA      = -15    # ↓ atļaujam tumšākus zobus
+DEF_B_DELTA      = +24    # ↑ atļaujam dzeltenākus zobus
 DEF_MIN_TOOTH_CC = 80
 
-# Mutes maskas pastiepums (nemainu platumu)
-MOUTH_DILATE_KX_SCALE = 0.003
+# Mutes maskas pastiepums
+MOUTH_DILATE_KX_SCALE = 0.006  # ↑ plašāk uz sāniem, lai paņem molārus
 MOUTH_DILATE_KY_SCALE = 0.016
-MOUTH_DILATE_ITERS    = 1
-MOUTH_EDGE_GUARD      = 6
+MOUTH_DILATE_ITERS    = 2      # ↑ mazliet vairāk pastiepjam
+MOUTH_EDGE_GUARD      = 4      # ↓ tuvāk lūpai, lai apakša nepazūd
 MOUTH_FEATHER_PX      = 15
 
-# Tumšā gaisma / dzeltenāki zobi (nemainu)
+# Tumšā gaisma / dzeltenāki zobi
 ALLOW_DARKER_L   = 60
 ALLOW_YELLO_B    = 60
-SIDE_GROW_PX     = 40
-RED_SAT_MIN      = 65
+SIDE_GROW_PX     = 55     # ↑ paplašinām zobu masku horizontāli
+RED_SAT_MIN      = 25
 
 # --- Gum/lip suppression (sarkanā izņemšana) ---
-RED_H1_MAX   = 15   # HSV sarkanā apakšējais logs: 0..15
-RED_H2_MIN   = 170  # HSV sarkanā augšējais logs: 170..180
-RED_S_MIN    = 35   # minimālais piesātinājums, lai skaitītos “sarkans”
-LAB_A_MIN    = 145  # LAB A kanāls: > šo – rozā/sarkans (smaganas/lūpa)
-LIP_BACKOFF  = 2    # px, cik ļoti atbīdīties no lūpu malas (dilatē smaganu masku)
+RED_H1_MAX   = 18   # ↑ platāks sarkanā logs (apakšējais)
+RED_H2_MIN   = 168  # ↑ platāks sarkanā logs (augšējais)
+RED_S_MIN    = 45   # ↑ vajag lielāku piesātinājumu, lai “sarkans”
+LAB_A_MIN    = 152  # ↑ agresīvāk izmet rozā/sarkano (smaganas/lūpa)
+LIP_BACKOFF  = 3    # ↑ neliela atkāpe no lūpas malas
 
 def _getf(name, default):
     v = request.args.get(name)
