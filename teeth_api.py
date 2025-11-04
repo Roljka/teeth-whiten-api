@@ -27,29 +27,29 @@ INNER_LIP_IDX = np.array(
 )
 
 # ---------- Noklusētie TUNING ----------
-DEF_DIL_H_SCALE = 0.060
-DEF_DIL_V_SCALE = 0.025
-DEF_EDGE_GUARD   = 4
+DEF_DIL_H_SCALE = 0.065
+DEF_DIL_V_SCALE = 0.022
+DEF_EDGE_GUARD   = 5
 DEF_FEATHER_PX   = 15
-DEF_A_MAX        = 138   # stingrāk izmetam rozā/sarkano (smaganas/lūpa)
-DEF_RED_H_LOW    = 20    # plašāks sarkanā logs
-DEF_RED_H_HIGH   = 165
-DEF_RED_S_MIN    = 60    # vajag lielāku piesātinājumu, lai skaitītos “sarkans”
-DEF_L_DELTA      = -22   # atļaujam tumšākus zobus
-DEF_B_DELTA      = +32   # atļaujam dzeltenākus zobus
-DEF_MIN_TOOTH_CC = 80
+DEF_A_MAX        = 136   # stingrāk griež rozā/sarkano (smaganas/lūpa)
+DEF_RED_H_LOW    = 18    # plašāks sarkanā logs
+DEF_RED_H_HIGH   = 168
+DEF_RED_S_MIN    = 52    # pietiekams piesātinājums, lai skaitītos “sarkans”
+DEF_L_DELTA      = -26   # ļauj tumšākiem zobiem tikt iekšā
+DEF_B_DELTA      = +34   # ļauj dzeltenākiem zobiem tikt iekšā
+DEF_MIN_TOOTH_CC = 70    # mazāk atmetam “zobus” tumšās bildēs
 
 # Mutes maskas pastiepums
-MOUTH_DILATE_KX_SCALE = 0.006  # plašāk sānos (molāri)
-MOUTH_DILATE_KY_SCALE = 0.016
+MOUTH_DILATE_KX_SCALE = 0.008  # plašāk sānos (molāri)
+MOUTH_DILATE_KY_SCALE = 0.014
 MOUTH_DILATE_ITERS    = 2
-MOUTH_EDGE_GUARD      = 5      # nedaudz lielāka atkāpe no lūpas malas
+MOUTH_EDGE_GUARD      = 6      # atkāpe no lūpas malas
 MOUTH_FEATHER_PX      = 15
 
 # Tumšā gaisma / dzeltenāki zobi
-ALLOW_DARKER_L   = 75   # vēl tumšāki zobi tiek iekšā
-ALLOW_YELLO_B    = 80   # vēl dzeltenāki zobi tiek iekšā
-SIDE_GROW_PX     = 55   # horizontāla paplašināšana (sānu zobi)
+ALLOW_DARKER_L   = 90   # iekļaujam vēl tumšākus zobus
+ALLOW_YELLO_B    = 85   # iekļaujam vēl dzeltenākus zobus
+SIDE_GROW_PX     = 60   # paplašinām masku līdz sānu zobiem
 RED_SAT_MIN      = 50   # papildus sarkanā filtrs (HSV S slieksnis)
 
 # --- Gum/lip suppression (ja tev ir šie kodā) ---
