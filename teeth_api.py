@@ -39,6 +39,11 @@ MOUTH_DILATE_KY_SCALE = 0.018  # vertikālais “pastiepums” (↓, lai nelien 
 MOUTH_DILATE_ITERS    = 1      # cik reizes dilatēt (2 = stiprāk)
 MOUTH_EDGE_GUARD      = 3      # atkāpšanās no lūpu malas (px, 3–5)
 MOUTH_FEATHER_PX      = 15     # mīksta mala (px)
+# === TEETH TUNING (zemas gaismas/tumšākiem zobiem) ===
+ALLOW_DARKER_L   = 15   # cik daudz zemāk par slieksni atļaujam L (gaišumu)
+ALLOW_YELLO_B    = 20   # cik daudz augstāk par slieksni atļaujam B (dzeltenumu)
+SIDE_GROW_PX     = 6    # horizontāla maskas paplašināšana (px) pēc atlases
+RED_SAT_MIN      = 25   # S slieksnis “sarkanā” maskai (smaganas/lūpas)
 
 def _getf(name, default):
     v = request.args.get(name, None)
@@ -98,54 +103,75 @@ def _build_mouth_mask(img_bgr, landmarks):
     return mask
 
 def _build_teeth_mask(img_bgr, mouth_mask):
-    # parametri no query
-    A_MAX        = _geti("amax", DEF_A_MAX)
-    RED_H_LOW    = _geti("redLow", DEF_RED_H_LOW)
-    RED_H_HIGH   = _geti("redHigh", DEF_RED_H_HIGH)
-    RED_S_MIN    = _geti("redS", DEF_RED_S_MIN)
-    L_DELTA      = _geti("ld", DEF_L_DELTA)
-    B_DELTA      = _geti("bd", DEF_B_DELTA)
-    EDGE_GUARD   = _geti("edge", DEF_EDGE_GUARD)
-
+    """
+    Stabils zobu segums arī tumšākās bildēs:
+      - normalizējam apgaismojumu tikai mutes zonā (CLAHE)
+      - sliekšņi no procentīļiem (nevis tikai Otsu)
+      - atļaujam tumšākus/dzeltenākus zobus (ALLOW_DARKER_L / ALLOW_YELLO_B)
+      - izmetam sarkanos (smaganas/lūpas)
+      - nobeigumā paplašinām masku horizontāli (SIDE_GROW_PX)
+    """
     if mouth_mask.sum() == 0:
         return np.zeros_like(mouth_mask)
 
+    h, w = mouth_mask.shape[:2]
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
     L, A, B = cv2.split(lab)
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-    H, S, _V = cv2.split(hsv)
+    H, S, V = cv2.split(hsv)
 
     m = mouth_mask > 0
     if not np.any(m):
         return np.zeros_like(mouth_mask)
 
-    L_thr, _ = cv2.threshold(L[m].astype(np.uint8), 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
-    B_thr, _ = cv2.threshold(B[m].astype(np.uint8), 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+    # -- 1) CLAHE tikai mutes zonā (mazāk plankumu tumšā apgaismojumā)
+    L_eq = L.copy()
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    L_eq[m] = clahe.apply(L[m])
 
-    L_thr = max(40, int(L_thr) + int(L_DELTA))
-    B_thr = min(240, int(B_thr) + int(B_DELTA))
+    # -- 2) Dinamiski sliekšņi no procentīļiem mutes zonā
+    Lp = np.percentile(L_eq[m], 55)   # ~vidēji gaismi
+    Bp = np.percentile(B[m],    60)   # ~vidēji dzelt.
+    L_thr = max(40, int(Lp) - ALLOW_DARKER_L)
+    B_thr = min(210, int(Bp) + ALLOW_YELLO_B)
 
-    red_hsv = (((H <= RED_H_LOW) | (H >= RED_H_HIGH)) & (S >= RED_S_MIN))
-    red_lab = (A >= A_MAX)
-    red_like = (red_hsv | red_lab)
+    # -- 3) Sarkanais (smaganas/lūpas) pēc HSV (H ap 0/180 ar pietiekamu S)
+    red_like = (((H <= 12) | (H >= 170)) & (S > RED_SAT_MIN))
 
-    raw = ((L > L_thr) & (B < B_thr) & (~red_like) & m).astype(np.uint8) * 255
+    # -- 4) Kandidāti: pietiekami gaiši un ne pārāk dzelteni, nesarkani, mutes zonā
+    raw = ((L_eq > L_thr) & (B < B_thr) & (~red_like) & m).astype(np.uint8) * 255
 
-    guard_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (EDGE_GUARD*2+1, EDGE_GUARD*2+1))
+    # drošības malas atkāpe no lūpas
+    guard = 3
+    guard_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (guard*2+1, guard*2+1))
     inner_safe = cv2.erode(mouth_mask, guard_k, iterations=1)
     raw = cv2.bitwise_and(raw, inner_safe)
 
-    raw = cv2.morphologyEx(raw, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), 1)
-    raw = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8), 2)
+    # morfoloģija – noņem sīkumu un aizver spraugas
+    raw = cv2.morphologyEx(raw, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), iterations=1)
+    raw = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8), iterations=2)
 
+    # aizpildām caurumus, lai nebūtu plankumi
     cnts, _ = cv2.findContours(raw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     filled = np.zeros_like(raw)
-    MIN_TOOTH_CC = _geti("mincc", DEF_MIN_TOOTH_CC)
     for c in cnts:
-        if cv2.contourArea(c) > MIN_TOOTH_CC:
-            cv2.drawContours(filled, [c], -1, 255, -1)
+        if cv2.contourArea(c) > 80:
+            cv2.drawContours(filled, [c], -1, 255, thickness=-1)
 
-    return _smooth_mask(filled, _geti("feather", DEF_FEATHER_PX))
+    teeth = filled
+
+    # -- 5) Paplašinām horizontāli, lai aizsniegtu sānu zobus
+    if SIDE_GROW_PX > 0:
+        kx = SIDE_GROW_PX * 2 + 1
+        ky = 3
+        grow_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kx, ky))
+        teeth = cv2.dilate(teeth, grow_k, iterations=1)
+        # neiziet ārpus mutes
+        teeth = cv2.bitwise_and(teeth, mouth_mask)
+
+    # mīksta mala
+    teeth = cv2.GaussianBlur(teeth, (15,15), 0)
+    return teeth
 
 def _teeth_whiten(img_bgr):
     FEATHER_PX = _geti("feather", DEF_FEATHER_PX)
