@@ -51,7 +51,7 @@ def _build_mouth_mask(img_bgr, landmarks):
     cv2.fillPoly(mask, [inner], 255)
 
     # TIGHTER padding
-    pad_k = 0.024   # ← pieliec 0.018..0.030 pēc gaumes (mazāks = tuvāk zobiem)
+    pad_k = 0.018   # ← pieliec 0.018..0.030 pēc gaumes (mazāks = tuvāk zobiem)
     dil = max(6, int(math.sqrt(area) * pad_k))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil, dil))
     mask = cv2.dilate(mask, kernel, iterations=1)
