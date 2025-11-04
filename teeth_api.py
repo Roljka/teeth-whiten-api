@@ -34,7 +34,7 @@ DEF_RED_S_MIN    = 28
 DEF_L_DELTA      = -10    # L thr korekcija
 DEF_B_DELTA      = +18    # B thr korekcija
 DEF_MIN_TOOTH_CC = 80
-MOUTH_DILATE_KX_SCALE = 0.085  # horizontālais “pastiepums” (↑ → platāk uz sāniem)
+MOUTH_DILATE_KX_SCALE = 0.011  # horizontālais “pastiepums” (↑ → platāk uz sāniem)
 MOUTH_DILATE_KY_SCALE = 0.018  # vertikālais “pastiepums” (↓, lai nelien uz lūpām)
 MOUTH_DILATE_ITERS    = 1      # cik reizes dilatēt (2 = stiprāk)
 MOUTH_EDGE_GUARD      = 3      # atkāpšanās no lūpu malas (px, 3–5)
