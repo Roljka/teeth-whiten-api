@@ -51,10 +51,10 @@ def _build_mouth_mask(img_bgr, landmarks):
 
     # Mazāka paplašināšana; NEbīdam uz leju (mazāk lūpu paķeršanas)
     side = math.sqrt(area)
-kx = max(9, int(side * 0.06)) | 1   # plašāk uz sāniem
-ky = max(5, int(side * 0.025)) | 1  # mazāk vertikāli, lai neuzkāpj uz lūpām
-kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kx, ky))
-mask = cv2.dilate(mask, kernel, iterations=1)
+    kx = max(9, int(side * 0.06)) | 1   # plašāk uz sāniem
+    ky = max(5, int(side * 0.025)) | 1  # mazāk vertikāli, lai neuzkāpj uz lūpām
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kx, ky))
+    mask = cv2.dilate(mask, kernel, iterations=1)
 
     mask = _smooth_mask(mask, 17)
     return mask
@@ -79,14 +79,13 @@ def _build_teeth_mask(img_bgr, mouth_mask):
         return np.zeros_like(mouth_mask)
 
     # --- Otsu sliekšņi tikai mutes zonā ---
-L_roi = L[m]; B_roi = B[m]
-L_thr, _ = cv2.threshold(L_roi.astype(np.uint8), 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
-B_thr, _ = cv2.threshold(B_roi.astype(np.uint8), 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+    L_roi = L[m]; B_roi = B[m]
+    L_thr, _ = cv2.threshold(L_roi.astype(np.uint8), 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+    B_thr, _ = cv2.threshold(B_roi.astype(np.uint8), 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
 
-# ↓↓↓ Pievienojam toleranci tumšākiem/dzeltenākiem zobiem
-L_thr = max(40, int(L_thr) - 10)   # atļaujam tumšākus (samazinām L slieksni)
-B_thr = min(200, int(B_thr) + 15)  # atļaujam dzeltenākus (palielinām B slieksni)
-
+    # ↓↓↓ Pievienojam toleranci tumšākiem/dzeltenākiem zobiem
+    L_thr = max(40, int(L_thr) - 10)   # atļaujam tumšākus (samazinām L slieksni)
+    B_thr = min(200, int(B_thr) + 15)  # atļaujam dzeltenākus (palielinām B slieksni)
 
     # HSV sarkanais (lūpas/smaganas): H 0..12 vai 170..180 un pietiekams S
     red_like = (((H <= 12) | (H >= 170)) & (S > 25))
