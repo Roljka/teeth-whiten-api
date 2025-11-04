@@ -105,8 +105,19 @@ def _build_teeth_mask(img_bgr, mouth_mask):
     m = mouth_mask > 0
 
     # Adaptīvi sliekšņi tikai mutes zonai
-    L_roi = L[m]
-    B_roi = B[m]
+   L_roi = L[m]
+B_roi = B[m]
+
+if L_roi.size == 0 or B_roi.size == 0:
+    # Fallback: izmanto mutes maskas kvantiļus vai konstantes
+    mouth_m = mouth_mask > 0
+    if np.any(mouth_m):
+        L_thr = int(np.percentile(L[mouth_m], 60))
+        B_thr = int(np.percentile(B[mouth_m], 60))
+    else:
+        L_thr = TEETH_L_MIN
+        B_thr = TEETH_B_MAX
+else:
     L_thr, _ = cv2.threshold(L_roi.astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     B_thr, _ = cv2.threshold(B_roi.astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
@@ -247,18 +258,23 @@ def _read_image_from_request():
 # ---------- API ----------
 @app.route("/whiten", methods=["POST"])
 def whiten():
-    img_bgr, err = _read_image_from_request()
-    if err:
-        return jsonify({"error": err[0]}), err[1]
+    try:
+        img_bgr, err = _read_image_from_request()
+        if err:
+            return jsonify({"error": err[0]}), err[1]
 
-    out_bgr = _teeth_whiten(img_bgr)
+        out_bgr = _teeth_whiten(img_bgr)
 
-    out_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
-    pil = Image.fromarray(out_rgb)
-    buf = io.BytesIO()
-    pil.save(buf, format="JPEG", quality=92)
-    buf.seek(0)
-    return send_file(buf, mimetype="image/jpeg")
+        out_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+        pil = Image.fromarray(out_rgb)
+        buf = io.BytesIO()
+        pil.save(buf, format="JPEG", quality=92)
+        buf.seek(0)
+        return send_file(buf, mimetype="image/jpeg")
+    except Exception as e:
+        # Dev-draudzīgs atbildes formāts – nebūs 500 HTML lapa
+        return jsonify({"error": f"processing_failed: {type(e).__name__}: {e}"}), 400
+
 
 @app.route("/", methods=["GET"])
 def health():
