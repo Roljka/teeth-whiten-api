@@ -40,7 +40,7 @@ DEF_B_DELTA      = +18    # B thr korekcija
 DEF_MIN_TOOTH_CC = 80
 
 # Mutes maskas pastiepums
-MOUTH_DILATE_KX_SCALE = 0.016
+MOUTH_DILATE_KX_SCALE = 0.003
 MOUTH_DILATE_KY_SCALE = 0.016
 MOUTH_DILATE_ITERS    = 1
 MOUTH_EDGE_GUARD      = 6
@@ -204,8 +204,8 @@ def _teeth_whiten(img_bgr):
 
     Lf = L.astype(np.float32)
     Bf = B.astype(np.float32)
-    Lf[m] = np.clip(Lf[m] * 1.15 + 12, 0, 255)
-    Bf[m] = np.clip(Bf[m] * 0.82 - 8, 0, 255)
+    Lf[m] = np.clip(Lf[m] * 1.10 + 10, 0, 255)
+    Bf[m] = np.clip(Bf[m] * 0.84 - 6, 0, 255)
 
     out = cv2.merge([Lf.astype(np.uint8), A, Bf.astype(np.uint8)])
     out_bgr = cv2.cvtColor(out, cv2.COLOR_LAB2BGR)
