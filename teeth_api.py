@@ -187,10 +187,14 @@ def _teeth_whiten(img_bgr):
     L, A, B = cv2.split(lab)
     m = teeth_mask > 0
 
-    # 3) Normalizējam apgaismojumu iekš maskas
-    clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP, tileGridSize=(8, 8))
-    L_eq = L.copy()
-    L_eq[m] = clahe.apply(L[m])
+    # 3) Normalizējam apgaismojumu iekš maskas (plankumu mazināšanai)
+clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP, tileGridSize=(8, 8))
+
+# IMPORTANT FIX: CLAHE jāliek uz visa 2D L kanāla, nevis uz 1D vektora L[m]
+L_eq_full = clahe.apply(L)          # pilns 2D rezultāts
+L_eq = L.copy()
+L_eq[m] = L_eq_full[m]              # pa masku ievelkam normalizētās vērtības
+
 
     # 4) Dabīgs “balinājums”
     p95 = np.percentile(L_eq[m], 95) if np.any(m) else 200
