@@ -40,10 +40,10 @@ DEF_B_DELTA      = +18    # B thr korekcija
 DEF_MIN_TOOTH_CC = 80
 
 # Mutes maskas pastiepums
-MOUTH_DILATE_KX_SCALE = 0.011
-MOUTH_DILATE_KY_SCALE = 0.018
+MOUTH_DILATE_KX_SCALE = 0.016
+MOUTH_DILATE_KY_SCALE = 0.016
 MOUTH_DILATE_ITERS    = 1
-MOUTH_EDGE_GUARD      = 4
+MOUTH_EDGE_GUARD      = 6
 MOUTH_FEATHER_PX      = 15
 
 # Tumšā gaisma / dzeltenāki zobi
