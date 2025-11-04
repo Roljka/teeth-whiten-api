@@ -43,13 +43,13 @@ DEF_MIN_TOOTH_CC = 80
 MOUTH_DILATE_KX_SCALE = 0.011
 MOUTH_DILATE_KY_SCALE = 0.018
 MOUTH_DILATE_ITERS    = 1
-MOUTH_EDGE_GUARD      = 3
+MOUTH_EDGE_GUARD      = 4
 MOUTH_FEATHER_PX      = 15
 
 # Tumšā gaisma / dzeltenāki zobi
-ALLOW_DARKER_L   = 15
-ALLOW_YELLO_B    = 20
-SIDE_GROW_PX     = 6
+ALLOW_DARKER_L   = 20
+ALLOW_YELLO_B    = 25
+SIDE_GROW_PX     = 15
 RED_SAT_MIN      = 25
 
 def _getf(name, default):
