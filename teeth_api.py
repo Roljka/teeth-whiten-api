@@ -26,8 +26,8 @@ INNER_LIP_IDX = np.array([
 ], dtype=np.int32)
 
 # ---------- Tuning parametri (brīvi grozāmi) ----------
-DIL_H_SCALE = 0.080   # horizontālā paplašināšana (vairāk -> ķer sānu zobus)
-DIL_V_SCALE = 0.025   # vertikālā paplašināšana (mazāk -> netrāpa lūpās)
+DIL_H_SCALE = 0.011   # horizontālā paplašināšana (vairāk -> ķer sānu zobus)
+DIL_V_SCALE = 0.028   # vertikālā paplašināšana (mazāk -> netrāpa lūpās)
 EDGE_GUARD   = 4      # cik stipri “ierobežot” malu pret lūpām (px mērogots ar elipsi)
 FEATHER_PX   = 15     # maskas mīkstināšana (gauss)
 A_MAX        = 148    # LAB A kanāla griesti (virs tā uzskatām par rozā/sarkanu)
