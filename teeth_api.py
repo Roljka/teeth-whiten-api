@@ -27,30 +27,30 @@ INNER_LIP_IDX = np.array(
 )
 
 # ---------- Noklusētie TUNING ----------
-DEF_DIL_H_SCALE = 0.060   # horizontāli (nemainu)
-DEF_DIL_V_SCALE = 0.025   # vertikāli (nemainu)
-DEF_EDGE_GUARD   = 8      # +2 px drošības josla no lūpas
+DEF_DIL_H_SCALE = 0.060
+DEF_DIL_V_SCALE = 0.025
+DEF_EDGE_GUARD   = 10     # agresīvāka atkāpe no lūpas malas
 DEF_FEATHER_PX   = 15
-DEF_A_MAX        = 126    # zemāk = agresīvāk izmet rozā (smaganas)
-DEF_RED_H_LOW    = 28     # plašāks red logs, drošāk izmet smaganas/lūpas
-DEF_RED_H_HIGH   = 150
-DEF_RED_S_MIN    = 52     # lielāka S ⇒ jābūt “sarkanākam”, lai iekristu maskā
+DEF_A_MAX        = 112     # ĻOTI zems: gandrīz viss rozā/sarkans tiks izmests
+DEF_RED_H_LOW    = 45      # plašāks “red” logs (0..45 vai 135..180)
+DEF_RED_H_HIGH   = 135
+DEF_RED_S_MIN    = 65      # jābūt ļoti piesātinātam, lai paliktu maskā
 DEF_L_DELTA      = -10
 DEF_B_DELTA      = +18
 DEF_MIN_TOOTH_CC = 80
 
-# Mutes maskas pastiepums
-MOUTH_DILATE_KX_SCALE = 0.003  # nemainu (tavs platums)
-MOUTH_DILATE_KY_SCALE = 0.016  # nemainu
-MOUTH_DILATE_ITERS    = 1      # nemainu
-MOUTH_EDGE_GUARD      = 6      # nemainu (atkāpjas jau DEF_EDGE_GUARD)
-MOUTH_FEATHER_PX      = 15     # nemainu
+# Mutes maskas pastiepums (nemainu platumu)
+MOUTH_DILATE_KX_SCALE = 0.003
+MOUTH_DILATE_KY_SCALE = 0.016
+MOUTH_DILATE_ITERS    = 1
+MOUTH_EDGE_GUARD      = 6
+MOUTH_FEATHER_PX      = 15
 
-# Tumšā gaisma / dzeltenāki zobi
-ALLOW_DARKER_L   = 60    # nemainu
-ALLOW_YELLO_B    = 60    # nemainu
-SIDE_GROW_PX     = 40    # nemainu
-RED_SAT_MIN      = 52    # saskaņā ar DEF_RED_S_MIN
+# Tumšā gaisma / dzeltenāki zobi (nemainu)
+ALLOW_DARKER_L   = 60
+ALLOW_YELLO_B    = 60
+SIDE_GROW_PX     = 40
+RED_SAT_MIN      = 65
 
 def _getf(name, default):
     v = request.args.get(name)
