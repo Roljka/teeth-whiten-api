@@ -34,6 +34,11 @@ DEF_RED_S_MIN    = 28
 DEF_L_DELTA      = -10    # L thr korekcija
 DEF_B_DELTA      = +18    # B thr korekcija
 DEF_MIN_TOOTH_CC = 80
+MOUTH_DILATE_KX_SCALE = 0.085  # horizontālais “pastiepums” (↑ → platāk uz sāniem)
+MOUTH_DILATE_KY_SCALE = 0.018  # vertikālais “pastiepums” (↓, lai nelien uz lūpām)
+MOUTH_DILATE_ITERS    = 1      # cik reizes dilatēt (2 = stiprāk)
+MOUTH_EDGE_GUARD      = 3      # atkāpšanās no lūpu malas (px, 3–5)
+MOUTH_FEATHER_PX      = 15     # mīksta mala (px)
 
 def _getf(name, default):
     v = request.args.get(name, None)
@@ -61,12 +66,6 @@ def _smooth_mask(mask, k=11):
     return cv2.GaussianBlur(mask, (k, k), 0)
 
 def _build_mouth_mask(img_bgr, landmarks):
-    # parametri no query (vai default)
-    DIL_H_SCALE = _getf("dilH", DEF_DIL_H_SCALE)
-    DIL_V_SCALE = _getf("dilV", DEF_DIL_V_SCALE)
-    EDGE_GUARD  = _geti("edge", DEF_EDGE_GUARD)
-    FEATHER_PX  = _geti("feather", DEF_FEATHER_PX)
-
     h, w = img_bgr.shape[:2]
     inner = _landmarks_to_xy(landmarks, w, h, INNER_LIP_IDX)
 
@@ -74,19 +73,29 @@ def _build_mouth_mask(img_bgr, landmarks):
     if area < 500:
         return np.zeros((h, w), dtype=np.uint8)
 
+    # bāzes maska – iekšējā lūpa
     mask = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(mask, [inner], 255)
 
+    # anizotropa dilatācija ar TUNING parametriem
     side = max(1.0, math.sqrt(area))
-    kx = max(3, int(round(side * DIL_H_SCALE))) | 1
-    ky = max(3, int(round(side * DIL_V_SCALE))) | 1
+    kx = max(3, int(side * MOUTH_DILATE_KX_SCALE)) | 1
+    ky = max(3, int(side * MOUTH_DILATE_KY_SCALE)) | 1
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kx, ky))
-    mask = cv2.dilate(mask, kernel, iterations=1)
+    mask = cv2.dilate(mask, kernel, iterations=MOUTH_DILATE_ITERS)
 
-    guard_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (EDGE_GUARD*2+1, EDGE_GUARD*2+1))
-    inner_safe = cv2.erode(mask, guard_k, iterations=1)
+    # drošības josla no lūpu malas
+    if MOUTH_EDGE_GUARD > 0:
+        g = MOUTH_EDGE_GUARD
+        guard_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (g*2+1, g*2+1))
+        mask = cv2.erode(mask, guard_k, iterations=1)
 
-    return _smooth_mask(inner_safe, FEATHER_PX)
+    # mīksta mala
+    if MOUTH_FEATHER_PX > 0:
+        f = MOUTH_FEATHER_PX | 1
+        mask = cv2.GaussianBlur(mask, (f, f), 0)
+
+    return mask
 
 def _build_teeth_mask(img_bgr, mouth_mask):
     # parametri no query
