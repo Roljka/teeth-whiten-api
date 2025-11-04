@@ -47,8 +47,8 @@ MOUTH_EDGE_GUARD      = 6
 MOUTH_FEATHER_PX      = 15
 
 # Tumšā gaisma / dzeltenāki zobi
-ALLOW_DARKER_L   = 20
-ALLOW_YELLO_B    = 25
+ALLOW_DARKER_L   = 30
+ALLOW_YELLO_B    = 30
 SIDE_GROW_PX     = 15
 RED_SAT_MIN      = 25
 
