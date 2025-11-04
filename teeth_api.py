@@ -27,30 +27,30 @@ INNER_LIP_IDX = np.array(
 )
 
 # ---------- Noklusētie TUNING ----------
-DEF_DIL_H_SCALE = 0.060   # horizontāli (TAVI)
-DEF_DIL_V_SCALE = 0.025   # vertikāli (TAVI)
-DEF_EDGE_GUARD   = 6      # px (TAVS)
+DEF_DIL_H_SCALE = 0.060   # horizontāli (nemainu)
+DEF_DIL_V_SCALE = 0.025   # vertikāli (nemainu)
+DEF_EDGE_GUARD   = 8      # +2 px drošības josla no lūpas
 DEF_FEATHER_PX   = 15
-DEF_A_MAX        = 134    # stingrāk pret smaganām (zemāk = vairāk izgriež rozā)
-DEF_RED_H_LOW    = 18     # plašāks red logs, lai izkrīt lūpas/smaganas
-DEF_RED_H_HIGH   = 160
-DEF_RED_S_MIN    = 42     # vajag sarkanāku, lai skaitītos gum/lūpa
-DEF_L_DELTA      = -10    # TAVA vērtība
-DEF_B_DELTA      = +18    # TAVA vērtība
+DEF_A_MAX        = 126    # zemāk = agresīvāk izmet rozā (smaganas)
+DEF_RED_H_LOW    = 28     # plašāks red logs, drošāk izmet smaganas/lūpas
+DEF_RED_H_HIGH   = 150
+DEF_RED_S_MIN    = 52     # lielāka S ⇒ jābūt “sarkanākam”, lai iekristu maskā
+DEF_L_DELTA      = -10
+DEF_B_DELTA      = +18
 DEF_MIN_TOOTH_CC = 80
 
 # Mutes maskas pastiepums
-MOUTH_DILATE_KX_SCALE = 0.003  # TAVA vērtība (platums)
-MOUTH_DILATE_KY_SCALE = 0.016  # TAVA vērtība
-MOUTH_DILATE_ITERS    = 1      # TAVA vērtība
-MOUTH_EDGE_GUARD      = 6      # TAVA vērtība
-MOUTH_FEATHER_PX      = 15     # TAVA vērtība
+MOUTH_DILATE_KX_SCALE = 0.003  # nemainu (tavs platums)
+MOUTH_DILATE_KY_SCALE = 0.016  # nemainu
+MOUTH_DILATE_ITERS    = 1      # nemainu
+MOUTH_EDGE_GUARD      = 6      # nemainu (atkāpjas jau DEF_EDGE_GUARD)
+MOUTH_FEATHER_PX      = 15     # nemainu
 
 # Tumšā gaisma / dzeltenāki zobi
-ALLOW_DARKER_L   = 60    # TAVA vērtība (ļoti tumši zobi ok)
-ALLOW_YELLO_B    = 60    # TAVA vērtība
-SIDE_GROW_PX     = 40    # TAVA vērtība (paplašina sānos)
-RED_SAT_MIN      = 42    # saskaņots ar DEF_RED_S_MIN
+ALLOW_DARKER_L   = 60    # nemainu
+ALLOW_YELLO_B    = 60    # nemainu
+SIDE_GROW_PX     = 40    # nemainu
+RED_SAT_MIN      = 52    # saskaņā ar DEF_RED_S_MIN
 
 def _getf(name, default):
     v = request.args.get(name)
