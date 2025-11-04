@@ -26,7 +26,7 @@ INNER_LIP_IDX = np.array([
 ], dtype=np.int32)
 
 # ---------- Tuning parametri (brīvi grozāmi) ----------
-DIL_H_SCALE = 0.060   # horizontālā paplašināšana (vairāk -> ķer sānu zobus)
+DIL_H_SCALE = 0.080   # horizontālā paplašināšana (vairāk -> ķer sānu zobus)
 DIL_V_SCALE = 0.025   # vertikālā paplašināšana (mazāk -> netrāpa lūpās)
 EDGE_GUARD   = 4      # cik stipri “ierobežot” malu pret lūpām (px mērogots ar elipsi)
 FEATHER_PX   = 15     # maskas mīkstināšana (gauss)
@@ -34,8 +34,8 @@ A_MAX        = 148    # LAB A kanāla griesti (virs tā uzskatām par rozā/sark
 RED_H_LOW    = 12     # HSV: sarkanais zem 12°
 RED_H_HIGH   = 170    # HSV: sarkanais virs 170°
 RED_S_MIN    = 28     # HSV S piesātinājuma minimums, lai skaitītu kā lūpu/smaganu sarkano
-L_DELTA      = -10    # pazeminām Otsu L slieksni (ļauj tumšākus zobus)
-B_DELTA      = +18    # paaugstinām Otsu B slieksni (ļauj dzeltenākus zobus)
+L_DELTA      = -15    # pazeminām Otsu L slieksni (ļauj tumšākus zobus)
+B_DELTA      = +22    # paaugstinām Otsu B slieksni (ļauj dzeltenākus zobus)
 MIN_TOOTH_CC = 80     # min kontūra laukums (px) pēc maskas
 
 # ---------- Palīgfunkcijas ----------
