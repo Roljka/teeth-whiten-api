@@ -60,7 +60,7 @@ def _build_mouth_mask(img_bgr, landmarks):
 def _build_teeth_mask(img_bgr, mouth_mask):
     """
     Cieša un nepārtraukta zobu maska mutes iekšienē, izmantojot adaptīvus
-    (Otsu) sliekšņus L/B kanāliem. Izmet rozā (A kanāls) un malas (edge-guard).
+    (Otsu) sliekšņus L/B kanāliem. Smaganas/lūpas izmetam pēc HSV “sarkanā”.
     Ja rezultāts ir fragmentēts/mazs, atgriež drošu fallback masku.
     """
     if mouth_mask.sum() == 0:
@@ -69,6 +69,8 @@ def _build_teeth_mask(img_bgr, mouth_mask):
     h, w = mouth_mask.shape[:2]
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
     L, A, B = cv2.split(lab)
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    H, S, V = cv2.split(hsv)
 
     m = mouth_mask > 0
     if not np.any(m):
@@ -76,18 +78,17 @@ def _build_teeth_mask(img_bgr, mouth_mask):
 
     # --- Otsu sliekšņi tikai mutes zonā ---
     L_roi = L[m]; B_roi = B[m]
-    # mazs troksnis un kontrasta pacelšana, lai Otsu stabils
-    L_roi_blur = cv2.GaussianBlur(L_roi.reshape(-1,1), (0,0), 1).ravel()
-    B_roi_blur = cv2.GaussianBlur(B_roi.reshape(-1,1), (0,0), 1).ravel()
+    # (neliec blur pa 2D – ROI jau ir 1D; Otsu strādās uz histogrammas)
+    L_thr, _ = cv2.threshold(L_roi.astype(np.uint8), 0, 255,
+                             cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    B_thr, _ = cv2.threshold(B_roi.astype(np.uint8), 0, 255,
+                             cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # Otsu uz histogrammas
-    L_thr, _ = cv2.threshold(L_roi_blur.astype(np.uint8), 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
-    B_thr, _ = cv2.threshold(B_roi_blur.astype(np.uint8), 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+    # HSV sarkanais (lūpas/smaganas): H 0..12 vai 170..180 un pietiekams S
+    red_like = (((H <= 12) | (H >= 170)) & (S > 30))
 
-    # Zobi: gaišāki (L > L_thr) un mazāk dzelteni (B < B_thr)
-    # + izmetam rozā/sarkano (smaganas)
-    A_max = 150
-    raw = ((L > L_thr) & (B < B_thr) & (A < A_max) & m).astype(np.uint8) * 255
+    # Zobi: gaišāki (L > L_thr), mazāk dzelteni (B < B_thr), ne-sarkani, mutes zonā
+    raw = ((L > L_thr) & (B < B_thr) & (~red_like) & m).astype(np.uint8) * 255
 
     # Edge guard: novācam iekšējās malas joslu, lai neskar lūpu malu
     EDGE_GUARD = 5
@@ -113,15 +114,11 @@ def _build_teeth_mask(img_bgr, mouth_mask):
     teeth_area = teeth_mask.sum() / 255.0
     coverage = teeth_area / max(mouth_area, 1.0)
 
-    # pārāk maz pārklājums vai nav nepārtrauktības -> fallback
-    need_fallback = (coverage < 0.28)
-
-    if need_fallback:
-        # fallback: erodēta mutes maska bez smaganām
-        # (stingrs gum-cut un malas aizsardzība)
-        gum = (A > 148).astype(np.uint8) * 255
-        gum = cv2.dilate(gum, np.ones((3,3), np.uint8), 1)
-        base = cv2.bitwise_and(mouth_mask, cv2.bitwise_not(gum))
+    if coverage < 0.28:
+        # fallback: mutes maska bez sarkanā (lūpas/smaganas)
+        red_u8 = (red_like.astype(np.uint8) * 255)
+        red_u8 = cv2.dilate(red_u8, np.ones((3,3), np.uint8), 1)
+        base = cv2.bitwise_and(mouth_mask, cv2.bitwise_not(red_u8))
         base = cv2.erode(base, np.ones((3,3), np.uint8), 1)
         base = cv2.morphologyEx(base, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), 1)
         base = cv2.morphologyEx(base, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8), 2)
@@ -140,14 +137,16 @@ def _teeth_whiten(img_bgr):
     teeth_mask = _build_teeth_mask(img_bgr, mouth_mask)
 
     if np.sum(teeth_mask) == 0:
-        # pēdējais glābiņš – balinām konservatīvi mutes zonu bez smaganām
-        lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
-        L, A, B = cv2.split(lab)
-        gum = (A > 148).astype(np.uint8) * 255
-        mask = cv2.bitwise_and(mouth_mask, cv2.bitwise_not(gum))
+        # Pēdējais glābiņš – balinām konservatīvi mutes zonu bez sarkanā
+        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+        H, S, V = cv2.split(hsv)
+        red_like = (((H <= 12) | (H >= 170)) & (S > 30)).astype(np.uint8) * 255
+        mask = cv2.bitwise_and(mouth_mask, cv2.bitwise_not(red_like))
         mask = _smooth_mask(mask, 15)
         m = mask > 0
         if np.any(m):
+            lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+            L, A, B = cv2.split(lab)
             Lf = L.astype(np.float32); Bf = B.astype(np.float32)
             Lf[m] = np.clip(Lf[m] * 1.12 + 10, 0, 255)
             Bf[m] = np.clip(Bf[m] * 0.86 - 6, 0, 255)
