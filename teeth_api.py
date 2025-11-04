@@ -52,6 +52,13 @@ ALLOW_YELLO_B    = 60
 SIDE_GROW_PX     = 40
 RED_SAT_MIN      = 65
 
+# --- Gum/lip suppression (sarkanā izņemšana) ---
+RED_H1_MAX   = 15   # HSV sarkanā apakšējais logs: 0..15
+RED_H2_MIN   = 170  # HSV sarkanā augšējais logs: 170..180
+RED_S_MIN    = 35   # minimālais piesātinājums, lai skaitītos “sarkans”
+LAB_A_MIN    = 145  # LAB A kanāls: > šo – rozā/sarkans (smaganas/lūpa)
+LIP_BACKOFF  = 2    # px, cik ļoti atbīdīties no lūpu malas (dilatē smaganu masku)
+
 def _getf(name, default):
     v = request.args.get(name)
     if v is None: return float(default)
@@ -181,6 +188,40 @@ def _build_teeth_mask(img_bgr, mouth_mask):
     teeth = cv2.GaussianBlur(teeth, (15, 15), 0)
     return teeth
 
+def _suppress_red(teeth_mask, img_bgr, mouth_mask):
+    """
+    Izmet lūpas/smaganas no zobu maskas:
+      - HSV sarkanā logs (0..RED_H1_MAX vai RED_H2_MIN..180) ar S >= RED_S_MIN
+      - LAB A kanāls > LAB_A_MIN (rozā/sarkans)
+      - aizsardzība: skatāmies tikai mutes zonā + neliels backoff no lūpu malas
+    """
+    # HSV sarkanais
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    H, S, V = cv2.split(hsv)
+    red1 = (H <= RED_H1_MAX) & (S >= RED_S_MIN)
+    red2 = (H >= RED_H2_MIN) & (S >= RED_S_MIN)
+    red_hsv = (red1 | red2).astype(np.uint8) * 255
+
+    # LAB rozā/sarkans (smaganas)
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    _, A, _ = cv2.split(lab)
+    red_lab = (A >= LAB_A_MIN).astype(np.uint8) * 255
+
+    # Apvienojam “sarkano” un ierobežojam ar mutes zonu
+    gums = cv2.max(red_hsv, red_lab)
+    gums = cv2.bitwise_and(gums, mouth_mask)
+
+    # Mazs atvirzes slānis no lūpas malas (dilatējam gum-masku)
+    if LIP_BACKOFF > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (LIP_BACKOFF*2+1, LIP_BACKOFF*2+1))
+        gums = cv2.dilate(gums, k, iterations=1)
+
+    # Izgriežam “sarkano” no zobu maskas, pēc tam nedaudz notīrām un nofeiderējam
+    cleaned = cv2.bitwise_and(teeth_mask, cv2.bitwise_not(gums))
+    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), iterations=1)
+    cleaned = cv2.GaussianBlur(cleaned, (15, 15), 0)
+    return cleaned
+
 def _teeth_whiten(img_bgr):
     _ = _geti("feather", DEF_FEATHER_PX)  # hook nākotnei
 
@@ -195,6 +236,7 @@ def _teeth_whiten(img_bgr):
         return img_bgr
 
     teeth_mask = _build_teeth_mask(img_bgr, mouth_mask)
+    teeth_mask = _suppress_red(teeth_mask, img_bgr, mouth_mask)
     if np.sum(teeth_mask) == 0:
         return img_bgr
 
