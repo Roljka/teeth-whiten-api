@@ -43,30 +43,62 @@ def _build_mouth_mask(img_bgr, landmarks):
     h, w = img_bgr.shape[:2]
     inner = _landmarks_to_xy(landmarks, w, h, INNER_LIP_IDX)
 
-    # drošībai: ja poligons mazs/sačakarēts, atmet masku
     area = cv2.contourArea(inner)
     if area < 500:
         return np.zeros((h, w), dtype=np.uint8)
 
-    # sākuma maska – iekšējā lūpu atvere
     mask = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(mask, [inner], 255)
 
-    # dilatējam, lai ielīstu zem lūpas ēnas un sānu zobos
-    dil = max(10, int(math.sqrt(area) * 0.04))
+    # MAZĀKA paplašināšana un bez agresīvas pabīdīšanas uz leju
+    dil = max(8, int(math.sqrt(area) * 0.03))        # bija 0.04
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil, dil))
     mask = cv2.dilate(mask, kernel, iterations=1)
 
-    # Mazāks vertikālais pabīdiens (samazināts padding uz leju)
-    shift = max(0, dil // 4)   # <- bija dil // 2; samazināts
-    if shift > 0:
-        M = np.float32([[1, 0, 0], [0, 1, shift]])
-        shifted = cv2.warpAffine(mask, M, (w, h))
-        mask = cv2.max(mask, shifted)
-
-    # malu mīkstināšana
-    mask = _smooth_mask(mask, 21)
+    # vairs NEBīdam vertikāli (neradām lūpu paķeršanu)
+    mask = _smooth_mask(mask, 17)
     return mask
+
+
+def _build_teeth_mask(img_bgr, mouth_mask):
+    """Cieša zobu maska (bez lūpām/smaganām)."""
+    if mouth_mask.sum() == 0:
+        return mouth_mask
+
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    L, A, B = cv2.split(lab)
+
+    m = mouth_mask > 0
+    Lm = L[m]; Am = A[m]; Bm = B[m]
+    if Lm.size == 0:
+        return np.zeros_like(mouth_mask)
+
+    # Relatīvi sliekšņi pret mutes zonu
+    L_thr = np.percentile(Lm, 60)        # zobi parasti gaišāki
+    B_thr = np.percentile(Bm, 55)        # zemāks B = mazāk dzeltena
+    A_max = 150                          # rozā/sarkans (smaganas) virs šī
+
+    teeth0 = ((L > L_thr) & (B < B_thr) & (A < A_max) & m).astype(np.uint8) * 255
+
+    # Noņemam mutes iekšējās robežas joslu (edge-guard), lai netrāpītu lūpām
+    EDGE_GUARD = 4
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (EDGE_GUARD*2+1, EDGE_GUARD*2+1))
+    inner_shrunk = cv2.erode(mouth_mask, k, iterations=1)   # mutes maska, sašaurināta no malām
+    teeth1 = cv2.bitwise_and(teeth0, inner_shrunk)
+
+    # Mazie trokšņi prom + padarām vienmērīgāku
+    teeth1 = cv2.morphologyEx(teeth1, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), iterations=1)
+    # Piespiežam masku pie zobiem (mazliet saraujam prom no lūpām/smaganām)
+    ERODE_PX = 2
+    if ERODE_PX > 0:
+        k2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ERODE_PX*2+1, ERODE_PX*2+1))
+        teeth1 = cv2.erode(teeth1, k2, iterations=1)
+
+    # Neliels close, lai aizvērtu spraudziņas starp zobiem (ne pārāk!)
+    teeth1 = cv2.morphologyEx(teeth1, cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=1)
+
+    return _smooth_mask(teeth1, 15)
+
 
 def _teeth_whiten(img_bgr):
     h, w = img_bgr.shape[:2]
@@ -84,7 +116,13 @@ def _teeth_whiten(img_bgr):
     # 1) Mutes iekšējā maska
     mouth_mask = _build_mouth_mask(img_bgr, landmarks)
 
-    # 2) Rezerves “invert trick” maska — paņemam tumšākās zonas inversā
+    # 2) cieša zobu maska no krāsām mutes iekšienē
+teeth_mask = _build_teeth_mask(img_bgr, mouth_mask)
+
+if np.sum(teeth_mask) == 0:
+    return img_bgr
+    
+    # 3) Rezerves “invert trick” maska — paņemam tumšākās zonas inversā
     inv = 255 - img_bgr
     inv_hsv = cv2.cvtColor(inv, cv2.COLOR_BGR2HSV)
     # tumši-zilgani (zobi oriģinālā gaiši) ⇒ inv būs ar H~zils un V zemāks; te mīksts logs
