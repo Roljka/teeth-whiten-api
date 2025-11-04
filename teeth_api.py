@@ -20,7 +20,10 @@ face_mesh = mp_face_mesh.FaceMesh(
 )
 
 # Iekšējās lūpas landmarķi
-INNER_LIP_IDX = np.array([78,191,80,81,82,13,312,311,310,415,308,324,318,402,317,14,87,178,88,95], dtype=np.int32)
+INNER_LIP_IDX = np.array(
+    [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95],
+    dtype=np.int32
+)
 
 # ---------- Noklusētie TUNING (ja query nav) ----------
 DEF_DIL_H_SCALE = 0.060   # horizontāli
@@ -34,11 +37,14 @@ DEF_RED_S_MIN    = 28
 DEF_L_DELTA      = -10    # L thr korekcija
 DEF_B_DELTA      = +18    # B thr korekcija
 DEF_MIN_TOOTH_CC = 80
-MOUTH_DILATE_KX_SCALE = 0.011  # horizontālais “pastiepums” (↑ → platāk uz sāniem)
-MOUTH_DILATE_KY_SCALE = 0.018  # vertikālais “pastiepums” (↓, lai nelien uz lūpām)
+
+# Mutes maskas “pastiepums”
+MOUTH_DILATE_KX_SCALE = 0.011  # horizontālais pastiepums (↑ → platāk uz sāniem)
+MOUTH_DILATE_KY_SCALE = 0.018  # vertikālais pastiepums (↓, lai nelien uz lūpām)
 MOUTH_DILATE_ITERS    = 1      # cik reizes dilatēt (2 = stiprāk)
 MOUTH_EDGE_GUARD      = 3      # atkāpšanās no lūpu malas (px, 3–5)
 MOUTH_FEATHER_PX      = 15     # mīksta mala (px)
+
 # === TEETH TUNING (zemas gaismas/tumšākiem zobiem) ===
 ALLOW_DARKER_L   = 15   # cik daudz zemāk par slieksni atļaujam L (gaišumu)
 ALLOW_YELLO_B    = 20   # cik daudz augstāk par slieksni atļaujam B (dzeltenumu)
@@ -47,15 +53,21 @@ RED_SAT_MIN      = 25   # S slieksnis “sarkanā” maskai (smaganas/lūpas)
 
 def _getf(name, default):
     v = request.args.get(name, None)
-    if v is None: return float(default)
-    try: return float(v)
-    except: return float(default)
+    if v is None:
+        return float(default)
+    try:
+        return float(v)
+    except:
+        return float(default)
 
 def _geti(name, default):
     v = request.args.get(name, None)
-    if v is None: return int(default)
-    try: return int(v)
-    except: return int(default)
+    if v is None:
+        return int(default)
+    try:
+        return int(v)
+    except:
+        return int(default)
 
 def _landmarks_to_xy(landmarks, w, h, idx_list):
     pts = []
@@ -66,8 +78,10 @@ def _landmarks_to_xy(landmarks, w, h, idx_list):
 
 def _smooth_mask(mask, k=11):
     k = int(k)
-    if k < 1: k = 1
-    if k % 2 == 0: k += 1
+    if k < 1:
+        k = 1
+    if k % 2 == 0:
+        k += 1
     return cv2.GaussianBlur(mask, (k, k), 0)
 
 def _build_mouth_mask(img_bgr, landmarks):
@@ -92,7 +106,7 @@ def _build_mouth_mask(img_bgr, landmarks):
     # drošības josla no lūpu malas
     if MOUTH_EDGE_GUARD > 0:
         g = MOUTH_EDGE_GUARD
-        guard_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (g*2+1, g*2+1))
+        guard_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (g * 2 + 1, g * 2 + 1))
         mask = cv2.erode(mask, guard_k, iterations=1)
 
     # mīksta mala
@@ -124,32 +138,32 @@ def _build_teeth_mask(img_bgr, mouth_mask):
     if not np.any(m):
         return np.zeros_like(mouth_mask)
 
-    # -- 1) CLAHE tikai mutes zonā (mazāk plankumu tumšā apgaismojumā)
+    # 1) CLAHE tikai mutes zonā
     L_eq = L.copy()
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     L_eq[m] = clahe.apply(L[m])
 
-    # -- 2) Dinamiski sliekšņi no procentīļiem mutes zonā
-    Lp = np.percentile(L_eq[m], 55)   # ~vidēji gaismi
-    Bp = np.percentile(B[m],    60)   # ~vidēji dzelt.
+    # 2) Dinamiski sliekšņi no procentīļiem mutes zonā
+    Lp = np.percentile(L_eq[m], 55)   # ~vidēji gaišs
+    Bp = np.percentile(B[m], 60)      # ~vidēji dzeltens
     L_thr = max(40, int(Lp) - ALLOW_DARKER_L)
     B_thr = min(210, int(Bp) + ALLOW_YELLO_B)
 
-    # -- 3) Sarkanais (smaganas/lūpas) pēc HSV (H ap 0/180 ar pietiekamu S)
+    # 3) Sarkanais (smaganas/lūpas) pēc HSV (H ap 0/180 ar pietiekamu S)
     red_like = (((H <= 12) | (H >= 170)) & (S > RED_SAT_MIN))
 
-    # -- 4) Kandidāti: pietiekami gaiši un ne pārāk dzelteni, nesarkani, mutes zonā
+    # 4) Kandidāti: pietiekami gaiši un ne pārāk dzelteni, nesarkani, mutes zonā
     raw = ((L_eq > L_thr) & (B < B_thr) & (~red_like) & m).astype(np.uint8) * 255
 
     # drošības malas atkāpe no lūpas
     guard = 3
-    guard_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (guard*2+1, guard*2+1))
+    guard_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (guard * 2 + 1, guard * 2 + 1))
     inner_safe = cv2.erode(mouth_mask, guard_k, iterations=1)
     raw = cv2.bitwise_and(raw, inner_safe)
 
     # morfoloģija – noņem sīkumu un aizver spraugas
-    raw = cv2.morphologyEx(raw, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), iterations=1)
-    raw = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8), iterations=2)
+    raw = cv2.morphologyEx(raw, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+    raw = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
 
     # aizpildām caurumus, lai nebūtu plankumi
     cnts, _ = cv2.findContours(raw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -160,7 +174,7 @@ def _build_teeth_mask(img_bgr, mouth_mask):
 
     teeth = filled
 
-    # -- 5) Paplašinām horizontāli, lai aizsniegtu sānu zobus
+    # 5) Paplašinām horizontāli, lai aizsniegtu sānu zobus
     if SIDE_GROW_PX > 0:
         kx = SIDE_GROW_PX * 2 + 1
         ky = 3
@@ -170,11 +184,12 @@ def _build_teeth_mask(img_bgr, mouth_mask):
         teeth = cv2.bitwise_and(teeth, mouth_mask)
 
     # mīksta mala
-    teeth = cv2.GaussianBlur(teeth, (15,15), 0)
+    teeth = cv2.GaussianBlur(teeth, (15, 15), 0)
     return teeth
 
 def _teeth_whiten(img_bgr):
-    FEATHER_PX = _geti("feather", DEF_FEATHER_PX)
+    # ļaujam FEATHER_PX pārregulēt ar query (?feather=)
+    _ = _geti("feather", DEF_FEATHER_PX)  # pašlaik netiek tieši izmantots, bet atstājam hook
 
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     res = face_mesh.process(img_rgb)
@@ -192,12 +207,15 @@ def _teeth_whiten(img_bgr):
     L, A, B = cv2.split(lab)
     m = teeth_mask > 0
 
-    Lf = L.astype(np.float32); Bf = B.astype(np.float32)
+    Lf = L.astype(np.float32)
+    Bf = B.astype(np.float32)
     Lf[m] = np.clip(Lf[m] * 1.15 + 12, 0, 255)
     Bf[m] = np.clip(Bf[m] * 0.82 - 8, 0, 255)
 
     out = cv2.merge([Lf.astype(np.uint8), A, Bf.astype(np.uint8)])
     out_bgr = cv2.cvtColor(out, cv2.COLOR_LAB2BGR)
+
+    # viegls faktūras izlīdzinājums tikai zobu zonā
     blur = cv2.bilateralFilter(out_bgr, d=7, sigmaColor=40, sigmaSpace=40)
     out_bgr[m] = blur[m]
     return out_bgr
