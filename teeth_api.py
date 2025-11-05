@@ -47,7 +47,14 @@ RED_SAT_MIN    = 100
 # A_neutral     – A kanāla pievilkšana pie 128 (1.0 = neskart)
 # blend         – cik daudz jauno zobu ieblendet (0..1)
 WHITEN_LEVELS = {
-    "tone3":     dict(L_gain=1.04, L_bias=4,  B_gain=0.97, B_bias=-1, A_neutral=0.95, blend=0.70),
+   "tone3": {
+        "l_gain": 1.08,   # ↑ bija 1.06 – nedaudz vairāk paceļ gaišumu
+        "l_offset": 8,    # ↑ bija 6 – neliels papildus +L
+        "b_scale": 0.92,  # noturam maigāku dzeltenuma samazinājumu (bez zilguma)
+        "b_offset": -2,   # kā bija (vai -1, ja gribi vēl maigāk)
+        "a_mix": 0.90,    # 0.90 = maiga virzīšana uz neitralu A (mazāk rozā)
+        "alpha": 0.78     # ↑ bija 0.75 – mazliet spēcīgāks blends
+    },
     "tone5":     dict(L_gain=1.08, L_bias=7,  B_gain=0.93, B_bias=-2, A_neutral=0.90, blend=0.80),
     "tone8":     dict(L_gain=1.14, L_bias=10, B_gain=0.88, B_bias=-3, A_neutral=0.88, blend=0.86),
     "hollywood": dict(L_gain=1.18, L_bias=13, B_gain=0.84, B_bias=-4, A_neutral=0.86, blend=0.90),
