@@ -1,5 +1,3 @@
-# teeth_api.py
-
 import io
 import math
 import numpy as np
@@ -9,7 +7,7 @@ from flask_cors import CORS
 import cv2
 import mediapipe as mp
 import traceback
-import requests
+from urllib.request import urlopen, Request  # URL ielādei bez requests
 
 app = Flask(__name__)
 CORS(app)
@@ -29,50 +27,42 @@ INNER_LIP_IDX = np.array(
     dtype=np.int32
 )
 
-# ---------- Līmeņu iestatījumi ----------
-# Katrs līmenis nosaka:
-#  - L_GAIN, L_ADD: cik celt gaišumu (LAB L)
-#  - B_MUL, B_ADD: cik mazināt dzeltenumu (LAB B)
-#  - A_BLEND: cik ļoti tuvot A pie neitrālā 128 (0..1; 0=nelabot, 1=pilnīgi uz 128)
-#  - ALPHA: gala sajaukums ar oriģinālu (dabiskumam). 0.85 nozīmē 85% “jaunais”.
-LEVELS = {
-    "3tones":   {"L_GAIN": 1.05, "L_ADD": 4,  "B_MUL": 0.95, "B_ADD": -1, "A_BLEND": 0.08, "ALPHA": 0.70},
-    "5tones":   {"L_GAIN": 1.08, "L_ADD": 7,  "B_MUL": 0.92, "B_ADD": -2, "A_BLEND": 0.10, "ALPHA": 0.78},
-    "8tones":   {"L_GAIN": 1.12, "L_ADD": 10, "B_MUL": 0.88, "B_ADD": -3, "A_BLEND": 0.12, "ALPHA": 0.85},
-    "hollywood":{"L_GAIN": 1.18, "L_ADD": 14, "B_MUL": 0.82, "B_ADD": -4, "A_BLEND": 0.16, "ALPHA": 0.90},
+# ---------- Noklusētie TUNING (versija, kas “rullē”) ----------
+DEF_EDGE_GUARD   = 9      # px
+DEF_FEATHER_PX   = 15
+DEF_RED_S_MIN    = 32
+DEF_MIN_TOOTH_CC = 80
+
+# Mutes maskas pastiepums
+MOUTH_DILATE_KX_SCALE = 0.003  # platums sānos
+MOUTH_DILATE_KY_SCALE = 0.008  # mazāka vertikālā dilatācija (mazāk aizskar lūpas)
+MOUTH_DILATE_ITERS    = 1
+MOUTH_EDGE_GUARD      = 10     # atkāpe no lūpu malas
+MOUTH_FEATHER_PX      = 13
+
+# Tumšā gaisma / dzeltenāki zobi (maskas atlasei)
+ALLOW_DARKER_L   = 70
+ALLOW_YELLO_B    = 70
+SIDE_GROW_PX     = 55          # paplašinām uz sāniem
+RED_SAT_MIN      = 100         # agresīvi metam ārā sarkano (HSV S slieksnis)
+
+# ---------- Līmeņi (3, 5, 8 toņi, Hollywood) ----------
+# Katram līmenim: L_gain, L_bias, B_gain, B_bias, A_neutral_mix, blend_strength
+WHITEN_LEVELS = {
+    # ~3 toņi
+    "tone3":     dict(L_gain=1.05, L_bias=5,  B_gain=0.95, B_bias=-1, A_neutral=0.92, blend=0.75),
+    # ~5 toņi
+    "tone5":     dict(L_gain=1.08, L_bias=7,  B_gain=0.93, B_bias=-2, A_neutral=0.90, blend=0.80),
+    # ~8 toņi
+    "tone8":     dict(L_gain=1.12, L_bias=9,  B_gain=0.90, B_bias=-3, A_neutral=0.88, blend=0.85),
+    # “Hollywood” – balts, bet ar joprojām dabisku neitralizāciju
+    "hollywood": dict(L_gain=1.16, L_bias=12, B_gain=0.86, B_bias=-4, A_neutral=0.86, blend=0.88),
 }
 
-DEFAULT_LEVEL = "5tones"
-
-# ---------- Noklusētie TUNING ----------
-DEF_EDGE_GUARD   = 6
-DEF_FEATHER_PX   = 15
-
-# Mutes maskas pastiepums (anizotropa dilatācija)
-MOUTH_DILATE_KX_SCALE = 0.003
-MOUTH_DILATE_KY_SCALE = 0.016
-MOUTH_DILATE_ITERS    = 1
-MOUTH_EDGE_GUARD      = 6
-MOUTH_FEATHER_PX      = 15
-
-# Tumšā gaisma / dzeltenāki zobi
-ALLOW_DARKER_L   = 60
-ALLOW_YELLO_B    = 60
-SIDE_GROW_PX     = 40
-RED_SAT_MIN      = 25
-
-def _getf(name, default):
-    v = request.args.get(name)
-    if v is None: 
-        return float(default)
-    try:
-        return float(v)
-    except:
-        return float(default)
-
+# --- palīgi parametru lasīšanai (ja gribēsi kādreiz pielikt query) ---
 def _geti(name, default):
     v = request.args.get(name)
-    if v is None: 
+    if v is None:
         return int(default)
     try:
         return int(v)
@@ -88,10 +78,8 @@ def _landmarks_to_xy(landmarks, w, h, idx_list):
 
 def _smooth_mask(mask, k=11):
     k = int(k)
-    if k < 1:
-        k = 1
-    if k % 2 == 0:
-        k += 1
+    if k < 1: k = 1
+    if k % 2 == 0: k += 1
     return cv2.GaussianBlur(mask, (k, k), 0)
 
 def _build_mouth_mask(img_bgr, landmarks):
@@ -105,14 +93,14 @@ def _build_mouth_mask(img_bgr, landmarks):
     mask = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(mask, [inner], 255)
 
-    # anizotropa dilatācija ar TUNING parametriem
+    # anizotropa dilatācija
     side = max(1.0, math.sqrt(area))
     kx = max(3, int(side * MOUTH_DILATE_KX_SCALE)) | 1
     ky = max(3, int(side * MOUTH_DILATE_KY_SCALE)) | 1
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kx, ky))
     mask = cv2.dilate(mask, kernel, iterations=MOUTH_DILATE_ITERS)
 
-    # drošības josla no lūpu malas
+    # atkāpe no lūpu malas
     if MOUTH_EDGE_GUARD > 0:
         g = MOUTH_EDGE_GUARD
         guard_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (g*2+1, g*2+1))
@@ -127,12 +115,12 @@ def _build_mouth_mask(img_bgr, landmarks):
 
 def _build_teeth_mask(img_bgr, mouth_mask):
     """
-    Stabils zobu segums arī tumšākās bildēs:
-      - CLAHE tikai mutes zonai (caur pilna L ceļu)
-      - sliekšņi no procentīļiem
-      - atļaujam tumšākus/dzeltenākus zobus
-      - izmetam sarkanos (smaganas/lūpas) pēc HSV
-      - horizontāla “pastiepšana” uz sāniem
+    Stabils zobu segums:
+      - CLAHE mutes zonai
+      - procentīļu sliekšņi (L/B) + atļaujam tumšākus/dzeltenākus
+      - izmetam sarkanos (HSV)
+      - drošības atkāpe no lūpas + morfoloģija
+      - horizontāla dilatācija sānu zobiem
     """
     if mouth_mask.sum() == 0:
         return np.zeros_like(mouth_mask)
@@ -147,24 +135,24 @@ def _build_teeth_mask(img_bgr, mouth_mask):
     if not np.any(m):
         return np.zeros_like(mouth_mask)
 
-    # 1) CLAHE – uz pilnā L, tad ieliekam mutes zonā
+    # CLAHE uz pilna L, tad iemiksējam mutes zonā
     L_full_eq = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(L)
     L_eq = L.copy()
     L_eq[m] = L_full_eq[m]
 
-    # 2) Dinamiski sliekšņi no procentīļiem mutes zonā
+    # Dinamiskie sliekšņi
     Lp = np.percentile(L_eq[m], 55) if np.any(m) else 120
     Bp = np.percentile(B[m], 60)    if np.any(m) else 140
     L_thr = max(40, int(Lp) - ALLOW_DARKER_L)
     B_thr = min(210, int(Bp) + ALLOW_YELLO_B)
 
-    # 3) Sarkanais (smaganas/lūpas) pēc HSV
+    # Sarkanais (lūpas/smaganas)
     red_like = (((H <= 12) | (H >= 170)) & (S > RED_SAT_MIN))
 
-    # 4) Kandidāti
+    # Kandidāti
     raw = ((L_eq > L_thr) & (B < B_thr) & (~red_like) & m).astype(np.uint8) * 255
 
-    # drošības malas atkāpe no lūpas
+    # atkāpe no lūpas
     guard_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     inner_safe = cv2.erode(mouth_mask, guard_k, iterations=1)
     raw = cv2.bitwise_and(raw, inner_safe)
@@ -182,7 +170,7 @@ def _build_teeth_mask(img_bgr, mouth_mask):
 
     teeth = filled
 
-    # 5) Paplašinām horizontāli (uz sāniem), bet paliekam mutes zonā
+    # Pastiepjam uz sāniem
     if SIDE_GROW_PX > 0:
         kx = SIDE_GROW_PX * 2 + 1
         ky = 3
@@ -194,39 +182,87 @@ def _build_teeth_mask(img_bgr, mouth_mask):
     teeth = cv2.GaussianBlur(teeth, (15, 15), 0)
     return teeth
 
-def _apply_level_whitening(img_bgr, teeth_mask, level_key):
-    """Piemēro LAB korekcijas atbilstoši izvēlētajam līmenim + dabisku sajaukumu."""
-    params = LEVELS.get(level_key, LEVELS[DEFAULT_LEVEL])
+# ---------- Attēla ielāde ----------
+def _read_image_from_url(url: str):
+    try:
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(req, timeout=12) as r:
+            data = r.read()
+        pil = Image.open(io.BytesIO(data))
+        pil = ImageOps.exif_transpose(pil).convert("RGB")
+        img = np.array(pil)[:, :, ::-1]  # RGB->BGR
+        return img, None
+    except Exception as e:
+        return None, (f"cannot fetch image_url: {e}", 400)
 
-    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
-    L, A, B = cv2.split(lab)
-    m = teeth_mask > 0
+def _read_image_from_request():
+    """
+    Pieņem:
+      - multipart 'file' vai 'image'
+      - vai 'image_url' (form-data vai query)
+    """
+    image_url = request.form.get("image_url") or request.args.get("image_url")
+    if image_url:
+        return _read_image_from_url(image_url)
+
+    f = None
+    if 'file' in request.files:
+        f = request.files['file']
+    elif 'image' in request.files:
+        f = request.files['image']
+
+    if not f:
+        return None, ("missing file field 'file' or 'image_url'", 400)
+
+    try:
+        pil = Image.open(f.stream)
+        pil = ImageOps.exif_transpose(pil).convert("RGB")
+    except Exception as e:
+        return None, (f"cannot open image: {e}", 400)
+
+    img = np.array(pil)[:, :, ::-1]  # RGB->BGR
+    return img, None
+
+# ---------- Balināšana ----------
+def _apply_level_color(lab_img, mask, level_key: str):
+    """
+    Pielieto krāsas korekciju pēc līmeņa.
+    """
+    params = WHITEN_LEVELS.get(level_key, WHITEN_LEVELS["tone5"])
+    L_gain   = params["L_gain"]
+    L_bias   = params["L_bias"]
+    B_gain   = params["B_gain"]
+    B_bias   = params["B_bias"]
+    A_neutral= params["A_neutral"]
+    blend    = params["blend"]  # cik daudz jauno krāsu miksējam ar oriģinālu
+
+    L, A, B = cv2.split(lab_img)
+    m = mask > 0
 
     Lf = L.astype(np.float32)
     Af = A.astype(np.float32)
     Bf = B.astype(np.float32)
 
-    # Gaišums (L): multiplikatīvs + aditīvs pieaugums
-    Lf[m] = np.clip(Lf[m] * params["L_GAIN"] + params["L_ADD"], 0, 255)
+    # maigs gaišums
+    Lf[m] = np.clip(Lf[m] * L_gain + L_bias, 0, 255)
+    # mazāk dzeltenuma (bet ne līdz zilumam)
+    Bf[m] = np.clip(Bf[m] * B_gain + B_bias, 0, 255)
+    # nedaudz uz neitrālāku A (mazāk rozā/zilzaļās nobīdes)
+    Af[m] = np.clip(128 + (Af[m] - 128) * A_neutral, 0, 255)
 
-    # Dzeltenuma mazinājums (B)
-    Bf[m] = np.clip(Bf[m] * params["B_MUL"] + params["B_ADD"], 0, 255)
+    lab_new = cv2.merge([Lf.astype(np.uint8), Af.astype(np.uint8), Bf.astype(np.uint8)])
+    bgr_new = cv2.cvtColor(lab_new, cv2.COLOR_LAB2BGR)
 
-    # Nedaudz tuvāk neitralam A=128 (ne pārāk, lai nesanāk “zili zobi”)
-    if params["A_BLEND"] > 0:
-        Af[m] = np.clip(128 + (Af[m] - 128) * (1.0 - params["A_BLEND"]), 0, 255)
-
-    out = cv2.merge([Lf.astype(np.uint8), Af.astype(np.uint8), Bf.astype(np.uint8)])
-    out_bgr = cv2.cvtColor(out, cv2.COLOR_LAB2BGR)
-
-    # Maigs faktūras izlīdzinājums + dabiskāks blends ar oriģinālu
-    blur = cv2.bilateralFilter(out_bgr, d=7, sigmaColor=40, sigmaSpace=40)
-    alpha = (teeth_mask.astype(np.float32) / 255.0)[..., None] * float(params["ALPHA"])
-    out_bgr = (img_bgr * (1 - alpha) + blur * alpha).astype(np.uint8)
+    # maigs faktūras izlīdzinājums un dabiskāks blends
+    bgr_new = cv2.bilateralFilter(bgr_new, d=7, sigmaColor=40, sigmaSpace=40)
+    alpha = (mask.astype(np.float32) / 255.0)[..., None]
+    out_bgr = (lab_to_bgr(lab_img) * (1 - alpha*blend) + bgr_new * (alpha*blend)).astype(np.uint8)
     return out_bgr
 
-def _teeth_whiten(img_bgr, level_key):
-    # MediaPipe
+def lab_to_bgr(lab_img):
+    return cv2.cvtColor(lab_img, cv2.COLOR_LAB2BGR)
+
+def _teeth_whiten(img_bgr, level_key: str):
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     res = face_mesh.process(img_rgb)
     if not res.multi_face_landmarks:
@@ -241,74 +277,32 @@ def _teeth_whiten(img_bgr, level_key):
     if np.sum(teeth_mask) == 0:
         return img_bgr
 
-    return _apply_level_whitening(img_bgr, teeth_mask, level_key)
-
-def _pil_from_bytes(b):
-    pil = Image.open(io.BytesIO(b))
-    pil = ImageOps.exif_transpose(pil).convert("RGB")
-    return pil
-
-def _read_image_from_request():
-    """
-    Pieņem:
-      - multipart 'file' vai 'image'
-      - vai form-data 'image_url' (server-side fetch)
-    Atgriež: (BGR ndarray, None) vai (None, (error_msg, status))
-    """
-    try:
-        if 'file' in request.files:
-            f = request.files['file']
-            pil = Image.open(f.stream)
-            pil = ImageOps.exif_transpose(pil).convert("RGB")
-            img = np.array(pil)[:, :, ::-1]  # RGB->BGR
-            return img, None
-
-        if 'image' in request.files:
-            f = request.files['image']
-            pil = Image.open(f.stream)
-            pil = ImageOps.exif_transpose(pil).convert("RGB")
-            img = np.array(pil)[:, :, ::-1]
-            return img, None
-
-        image_url = request.form.get("image_url") or request.args.get("image_url")
-        if image_url:
-            resp = requests.get(image_url, timeout=10)
-            if resp.status_code != 200:
-                return None, (f"cannot fetch image_url (status {resp.status_code})", 400)
-            ctype = resp.headers.get("Content-Type", "")
-            if "image" not in ctype:
-                return None, (f"image_url returned non-image content-type: {ctype}", 400)
-            pil = _pil_from_bytes(resp.content)
-            img = np.array(pil)[:, :, ::-1]
-            return img, None
-
-        return None, ("missing file field 'file' (multipart/form-data) or 'image_url'", 400)
-    except Exception as e:
-        return None, (f"cannot open image: {e}", 400)
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    out_bgr = _apply_level_color(lab, teeth_mask, level_key)
+    return out_bgr
 
 # ---------- API ----------
-@app.route("/levels", methods=["GET"])
-def list_levels():
-    return jsonify({
-        "default": DEFAULT_LEVEL,
-        "levels": list(LEVELS.keys()),
-        "params": LEVELS
-    })
-
 @app.route("/whiten", methods=["POST"])
 def whiten():
     try:
-        # level var nākt kā form-data vai query
-        level_key = request.form.get("level") or request.args.get("level") or DEFAULT_LEVEL
-        if level_key not in LEVELS:
-            level_key = DEFAULT_LEVEL
-
         img_bgr, err = _read_image_from_request()
         if err:
             return jsonify({"error": err[0]}), err[1]
 
-        out_bgr = _teeth_whiten(img_bgr, level_key)
+        # līmeņa izvēle (form vai query): tone3 | tone5 | tone8 | hollywood
+        level = (request.form.get("level")
+                 or request.args.get("level")
+                 or "tone5").strip().lower()
+        if level not in WHITEN_LEVELS:
+            # pieņem arī 3/5/8/holo kā īsos alias
+            if level in {"3", "three"}: level = "tone3"
+            elif level in {"5", "five"}: level = "tone5"
+            elif level in {"8", "eight"}: level = "tone8"
+            elif level in {"holo", "hollywood", "hollywood_smile"}: level = "hollywood"
+            else:
+                level = "tone5"
 
+        out_bgr = _teeth_whiten(img_bgr, level)
         out_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(out_rgb)
         buf = io.BytesIO()
@@ -323,7 +317,7 @@ def whiten():
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"ok": True, "levels": list(LEVELS.keys()), "default": DEFAULT_LEVEL})
+    return jsonify({"ok": True, "levels": list(WHITEN_LEVELS.keys())})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000, debug=False)
