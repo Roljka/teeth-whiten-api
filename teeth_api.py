@@ -27,30 +27,31 @@ INNER_LIP_IDX = np.array(
 )
 
 # ---------- Noklusētie TUNING ----------
-DEF_DIL_H_SCALE = 0.060   # horizontāli
-DEF_DIL_V_SCALE = 0.025   # vertikāli
+DEF_DIL_H_SCALE = 0.060   # horizontāli (nav aktīvs šajā versijā, atstāj kā ir)
+DEF_DIL_V_SCALE = 0.025   # vertikāli  (nav aktīvs šajā versijā, atstāj kā ir)
 DEF_EDGE_GUARD   = 4      # px
 DEF_FEATHER_PX   = 15
-DEF_A_MAX        = 148    # LAB A (rozā/sarkans)
-DEF_RED_H_LOW    = 12     # HSV red
+DEF_A_MAX        = 148    # LAB A (nav izmantots šajā versijā)
+DEF_RED_H_LOW    = 12
 DEF_RED_H_HIGH   = 170
 DEF_RED_S_MIN    = 32
-DEF_L_DELTA      = -10    # L thr korekcija
-DEF_B_DELTA      = +18    # B thr korekcija
+DEF_L_DELTA      = -10
+DEF_B_DELTA      = +18
 DEF_MIN_TOOTH_CC = 80
 
 # Mutes maskas pastiepums
-MOUTH_DILATE_KX_SCALE = 0.003
-MOUTH_DILATE_KY_SCALE = 0.016
+MOUTH_DILATE_KX_SCALE = 0.005  # ↑ nedaudz platāk sānos, lai nezaudē molārus
+MOUTH_DILATE_KY_SCALE = 0.010  # ↓ mazāka vertikālā dilatācija (mazāk lien uz smaganām/lūpām)
 MOUTH_DILATE_ITERS    = 1
-MOUTH_EDGE_GUARD      = 6
+MOUTH_EDGE_GUARD      = 8      # ↑ lielāka atkāpe no lūpu malas (mazāk lūpu paķeršanas)
 MOUTH_FEATHER_PX      = 15
 
 # Tumšā gaisma / dzeltenāki zobi
 ALLOW_DARKER_L   = 60
 ALLOW_YELLO_B    = 60
-SIDE_GROW_PX     = 40
-RED_SAT_MIN      = 25
+SIDE_GROW_PX     = 50    # ↑ kompensē samazināto vertikāli, saglabā sānu zobus
+RED_SAT_MIN      = 58    # ↑ agresīvāk izmet sarkano (smaganas/lūpas) pēc HSV
+
 
 def _getf(name, default):
     v = request.args.get(name)
