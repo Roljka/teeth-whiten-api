@@ -27,27 +27,26 @@ INNER_LIP_IDX = np.array(
 )
 
 # ---------- TUNING ----------
-DEF_FEATHER_PX   = 15  # API param hooks, ja gribēsi vēlāk regulēt no frontenda
+DEF_FEATHER_PX   = 15
 
 # Mutes maskas pastiepums
-MOUTH_DILATE_KX_SCALE = 0.008  # plašāk sānos (molāri)
+MOUTH_DILATE_KX_SCALE = 0.010  # ↑ platāk sānos (palīdz sānu zobiem)
 MOUTH_DILATE_KY_SCALE = 0.014
 MOUTH_DILATE_ITERS    = 2
-MOUTH_EDGE_GUARD      = 6      # atkāpe no lūpas malas
+MOUTH_EDGE_GUARD      = 5      # ↓ mazāka atkāpe, lai nepazaudē malu
 MOUTH_FEATHER_PX      = 15
 
 # Tumšā gaisma / dzeltenāki zobi
-ALLOW_DARKER_L   = 90   # iekļaujam vēl tumšākus zobus
-ALLOW_YELLO_B    = 85   # iekļaujam vēl dzeltenākus zobus
-SIDE_GROW_PX     = 60   # paplašinām masku līdz sānu zobiem
+ALLOW_DARKER_L   = 110  # ↑ atļaujam tumšākus zobus
+ALLOW_YELLO_B    = 100  # ↑ atļaujam siltāku (dzeltenāku) emalju
+SIDE_GROW_PX     = 70   # ↑ paplašinām horizontāli
 
 # Gum/lip suppression
-RED_H1_MAX   = 20      # HSV "sarkanā" apakšējais logs (0..RED_H1_MAX)
-RED_H2_MIN   = 165     # HSV "sarkanā" augšējais logs (RED_H2_MIN..180)
-RED_S_MIN    = 60      # minimālais piesātinājums, lai skaitītos sarkans/oranžs
-LAB_A_MIN    = 160     # LAB A (rozā/sarkans) virs šī -> smaganas/lūpa
-LIP_BACKOFF  = 6       # cik px atkāpties no mutes malas (nekrāsot uz lūpām)
-
+RED_H1_MAX   = 15      # nedaudz šaurāks “tīrais sarkanais”
+RED_H2_MIN   = 170
+RED_S_MIN    = 45      # ↓ mazāks S slieksnis, lai netiktu izgriezti silti, bet zobi
+LAB_A_MIN    = 150     # ↓ mazāk agresīvs A kanāla grieziens
+LIP_BACKOFF  = 3       # ↓ mazāka atvirze no malas, lai josla “neapēd” zobus
 
 def _geti(name, default):
     v = request.args.get(name)
