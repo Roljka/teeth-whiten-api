@@ -29,7 +29,7 @@ INNER_LIP_IDX = np.array(
 # ---------- Noklusētie TUNING ----------
 DEF_DIL_H_SCALE = 0.060   # horizontāli (nav aktīvs šajā versijā, atstāj kā ir)
 DEF_DIL_V_SCALE = 0.025   # vertikāli  (nav aktīvs šajā versijā, atstāj kā ir)
-DEF_EDGE_GUARD   = 4      # px
+DEF_EDGE_GUARD   = 9      # px
 DEF_FEATHER_PX   = 15
 DEF_A_MAX        = 148    # LAB A (nav izmantots šajā versijā)
 DEF_RED_H_LOW    = 12
@@ -43,14 +43,14 @@ DEF_MIN_TOOTH_CC = 80
 MOUTH_DILATE_KX_SCALE = 0.005  # ↑ nedaudz platāk sānos, lai nezaudē molārus
 MOUTH_DILATE_KY_SCALE = 0.010  # ↓ mazāka vertikālā dilatācija (mazāk lien uz smaganām/lūpām)
 MOUTH_DILATE_ITERS    = 1
-MOUTH_EDGE_GUARD      = 8      # ↑ lielāka atkāpe no lūpu malas (mazāk lūpu paķeršanas)
+MOUTH_EDGE_GUARD      = 9      # ↑ lielāka atkāpe no lūpu malas (mazāk lūpu paķeršanas)
 MOUTH_FEATHER_PX      = 15
 
 # Tumšā gaisma / dzeltenāki zobi
-ALLOW_DARKER_L   = 60
-ALLOW_YELLO_B    = 60
-SIDE_GROW_PX     = 50    # ↑ kompensē samazināto vertikāli, saglabā sānu zobus
-RED_SAT_MIN      = 58    # ↑ agresīvāk izmet sarkano (smaganas/lūpas) pēc HSV
+ALLOW_DARKER_L   = 70
+ALLOW_YELLO_B    = 70
+SIDE_GROW_PX     = 55    # ↑ kompensē samazināto vertikāli, saglabā sānu zobus
+RED_SAT_MIN      = 100    # ↑ agresīvāk izmet sarkano (smaganas/lūpas) pēc HSV
 
 
 def _getf(name, default):
