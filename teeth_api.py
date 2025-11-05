@@ -26,18 +26,8 @@ INNER_LIP_IDX = np.array(
     dtype=np.int32
 )
 
-# ---------- Noklusētie TUNING ----------
-DEF_DIL_H_SCALE = 0.065
-DEF_DIL_V_SCALE = 0.022
-DEF_EDGE_GUARD   = 5
-DEF_FEATHER_PX   = 15
-DEF_A_MAX        = 136   # stingrāk griež rozā/sarkano (smaganas/lūpa)
-DEF_RED_H_LOW    = 18    # plašāks sarkanā logs
-DEF_RED_H_HIGH   = 168
-DEF_RED_S_MIN    = 52    # pietiekams piesātinājums, lai skaitītos “sarkans”
-DEF_L_DELTA      = -26   # ļauj tumšākiem zobiem tikt iekšā
-DEF_B_DELTA      = +34   # ļauj dzeltenākiem zobiem tikt iekšā
-DEF_MIN_TOOTH_CC = 70    # mazāk atmetam “zobus” tumšās bildēs
+# ---------- TUNING ----------
+DEF_FEATHER_PX   = 15  # API param hooks, ja gribēsi vēlāk regulēt no frontenda
 
 # Mutes maskas pastiepums
 MOUTH_DILATE_KX_SCALE = 0.008  # plašāk sānos (molāri)
@@ -50,26 +40,24 @@ MOUTH_FEATHER_PX      = 15
 ALLOW_DARKER_L   = 90   # iekļaujam vēl tumšākus zobus
 ALLOW_YELLO_B    = 85   # iekļaujam vēl dzeltenākus zobus
 SIDE_GROW_PX     = 60   # paplašinām masku līdz sānu zobiem
-RED_SAT_MIN      = 50   # papildus sarkanā filtrs (HSV S slieksnis)
 
-# --- Gum/lip suppression (ja tev ir šie kodā) ---
-RED_H1_MAX   = 20
-RED_H2_MIN   = 165
-RED_S_MIN    = 60
-LAB_A_MIN    = 160
-LIP_BACKOFF  = 6
+# Gum/lip suppression
+RED_H1_MAX   = 20      # HSV "sarkanā" apakšējais logs (0..RED_H1_MAX)
+RED_H2_MIN   = 165     # HSV "sarkanā" augšējais logs (RED_H2_MIN..180)
+RED_S_MIN    = 60      # minimālais piesātinājums, lai skaitītos sarkans/oranžs
+LAB_A_MIN    = 160     # LAB A (rozā/sarkans) virs šī -> smaganas/lūpa
+LIP_BACKOFF  = 6       # cik px atkāpties no mutes malas (nekrāsot uz lūpām)
 
-def _getf(name, default):
-    v = request.args.get(name)
-    if v is None: return float(default)
-    try: return float(v)
-    except: return float(default)
 
 def _geti(name, default):
     v = request.args.get(name)
-    if v is None: return int(default)
-    try: return int(v)
-    except: return int(default)
+    if v is None:
+        return int(default)
+    try:
+        return int(v)
+    except:
+        return int(default)
+
 
 def _landmarks_to_xy(landmarks, w, h, idx_list):
     pts = []
@@ -78,11 +66,15 @@ def _landmarks_to_xy(landmarks, w, h, idx_list):
         pts.append([int(lm.x * w), int(lm.y * h)])
     return np.array(pts, dtype=np.int32)
 
+
 def _smooth_mask(mask, k=11):
     k = int(k)
-    if k < 1: k = 1
-    if k % 2 == 0: k += 1
+    if k < 1:
+        k = 1
+    if k % 2 == 0:
+        k += 1
     return cv2.GaussianBlur(mask, (k, k), 0)
+
 
 def _build_mouth_mask(img_bgr, landmarks):
     h, w = img_bgr.shape[:2]
@@ -115,13 +107,14 @@ def _build_mouth_mask(img_bgr, landmarks):
 
     return mask
 
+
 def _build_teeth_mask(img_bgr, mouth_mask):
     """
     Stabils zobu segums arī tumšākās bildēs:
-      - CLAHE tikai mutes zonai (caur pilna L ceļu, lai nebūtu 1D kļūdas)
+      - CLAHE tikai mutes zonai (blend uz pilnā L)
       - sliekšņi no procentīļiem
       - atļaujam tumšākus/dzeltenākus zobus
-      - izmetam sarkanos (smaganas/lūpas)
+      - sākotnēji ignorējam sarkano (gross cut), precīza izmešana notiek vēlāk
       - horizontāla “pastiepšana” uz sāniem
     """
     if mouth_mask.sum() == 0:
@@ -137,23 +130,19 @@ def _build_teeth_mask(img_bgr, mouth_mask):
     if not np.any(m):
         return np.zeros_like(mouth_mask)
 
-    # 1) CLAHE – APPLY UZ PILNĀ L (2D), PĒC TAM IEBLENDĒ MUTES ZONĀ
+    # 1) CLAHE – uz pilnā L, pēc tam ieblendējam mutes zonā
     L_full_eq = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(L)
     L_eq = L.copy()
     L_eq[m] = L_full_eq[m]
 
     # 2) Dinamiski sliekšņi no procentīļiem mutes zonā
-    # (sargi, ja reģions sanāk tukšs)
-    if not np.any(m):
-        return np.zeros_like(mouth_mask)
-
     Lp = np.percentile(L_eq[m], 55) if np.any(m) else 120
     Bp = np.percentile(B[m], 60)    if np.any(m) else 140
     L_thr = max(40, int(Lp) - ALLOW_DARKER_L)
     B_thr = min(210, int(Bp) + ALLOW_YELLO_B)
 
-    # 3) Sarkanais (smaganas/lūpas) pēc HSV
-    red_like = (((H <= 12) | (H >= 170)) & (S > RED_SAT_MIN))
+    # 3) Rough “no red” (mazāk agresīvs pirmajā solī)
+    red_like = (((H <= 12) | (H >= 170)) & (S > RED_S_MIN))
 
     # 4) Kandidāti
     raw = ((L_eq > L_thr) & (B < B_thr) & (~red_like) & m).astype(np.uint8) * 255
@@ -188,39 +177,49 @@ def _build_teeth_mask(img_bgr, mouth_mask):
     teeth = cv2.GaussianBlur(teeth, (15, 15), 0)
     return teeth
 
+
+def _build_lip_guard_band(mouth_mask, band_px):
+    """Drošības josla gar mutes iekšējo malu, lai balināšana neuzkāpj uz lūpām."""
+    if band_px <= 0:
+        return np.zeros_like(mouth_mask)
+    dist = cv2.distanceTransform(255 - mouth_mask, cv2.DIST_L2, 3)
+    band = (dist < band_px).astype(np.uint8) * 255
+    # tikai tur, kur vispār ir mute
+    band = cv2.bitwise_and(band, mouth_mask)
+    return band
+
+
 def _suppress_red(teeth_mask, img_bgr, mouth_mask):
     """
     Izmet lūpas/smaganas no zobu maskas:
-      - HSV sarkanā logs (0..RED_H1_MAX vai RED_H2_MIN..180) ar S >= RED_S_MIN
-      - LAB A kanāls > LAB_A_MIN (rozā/sarkans)
-      - aizsardzība: skatāmies tikai mutes zonā + neliels backoff no lūpu malas
+      - HSV sarkanā + oranžā logs ar pietiekamu S
+      - LAB A kanāls (rozā/sarkans)
+      - neliels “backoff” no lūpu malas
     """
-    # HSV sarkanais
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
     H, S, V = cv2.split(hsv)
-    red1 = (H <= RED_H1_MAX) & (S >= RED_S_MIN)
-    red2 = (H >= RED_H2_MIN) & (S >= RED_S_MIN)
-    red_hsv = (red1 | red2).astype(np.uint8) * 255
-
-    # LAB rozā/sarkans (smaganas)
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
     _, A, _ = cv2.split(lab)
-    red_lab = (A >= LAB_A_MIN).astype(np.uint8) * 255
 
-    # Apvienojam “sarkano” un ierobežojam ar mutes zonu
-    gums = cv2.max(red_hsv, red_lab)
+    red1 = (H <= RED_H1_MAX) & (S >= RED_S_MIN)
+    red2 = (H >= RED_H2_MIN) & (S >= RED_S_MIN)
+    orange = (H >= 5) & (H <= 28) & (S >= RED_S_MIN)  # bieži smaganas/lūpas
+    red_hsv = (red1 | red2 | orange)
+
+    red_lab = (A >= LAB_A_MIN)
+
+    gums = ((red_hsv | red_lab).astype(np.uint8) * 255)
     gums = cv2.bitwise_and(gums, mouth_mask)
 
-    # Mazs atvirzes slānis no lūpas malas (dilatējam gum-masku)
     if LIP_BACKOFF > 0:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (LIP_BACKOFF*2+1, LIP_BACKOFF*2+1))
         gums = cv2.dilate(gums, k, iterations=1)
 
-    # Izgriežam “sarkano” no zobu maskas, pēc tam nedaudz notīrām un nofeiderējam
     cleaned = cv2.bitwise_and(teeth_mask, cv2.bitwise_not(gums))
     cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), iterations=1)
     cleaned = cv2.GaussianBlur(cleaned, (15, 15), 0)
     return cleaned
+
 
 def _teeth_whiten(img_bgr):
     _ = _geti("feather", DEF_FEATHER_PX)  # hook nākotnei
@@ -235,8 +234,15 @@ def _teeth_whiten(img_bgr):
     if mouth_mask.sum() == 0:
         return img_bgr
 
+    # Lip guard josla (nekrāsot pa lūpām)
+    lip_band = _build_lip_guard_band(mouth_mask, LIP_BACKOFF)
+
     teeth_mask = _build_teeth_mask(img_bgr, mouth_mask)
+    # Neļaujam zobu masai pieskarties lūpu joslai
+    teeth_mask = cv2.bitwise_and(teeth_mask, cv2.bitwise_not(lip_band))
+    # Izmetam smaganas/lūpas pēc krāsas
     teeth_mask = _suppress_red(teeth_mask, img_bgr, mouth_mask)
+
     if np.sum(teeth_mask) == 0:
         return img_bgr
 
@@ -257,6 +263,7 @@ def _teeth_whiten(img_bgr):
     out_bgr[m] = blur[m]
     return out_bgr
 
+
 def _read_image_from_request():
     if 'file' in request.files:
         f = request.files['file']
@@ -272,6 +279,7 @@ def _read_image_from_request():
     img = np.array(pil)[:, :, ::-1]  # RGB->BGR
     return img, None
 
+
 @app.route("/whiten", methods=["POST"])
 def whiten():
     try:
@@ -286,13 +294,14 @@ def whiten():
         buf.seek(0)
         return send_file(buf, mimetype="image/jpeg")
     except Exception as e:
-        # palīdzēs ātri saprast, ja vēl kas nobrūk prodā
         return jsonify({"error": f"processing_failed: {type(e).__name__}: {e}",
                         "trace": traceback.format_exc()}), 500
+
 
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"ok": True})
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000, debug=False)
