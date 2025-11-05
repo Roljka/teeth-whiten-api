@@ -1,12 +1,10 @@
-import io
-import math
+import io, math, traceback
 import numpy as np
 from PIL import Image, ImageOps
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 import cv2
 import mediapipe as mp
-import traceback
 
 app = Flask(__name__)
 CORS(app)
@@ -26,44 +24,18 @@ INNER_LIP_IDX = np.array(
     dtype=np.int32
 )
 
-# ---------- Noklusētie TUNING ----------
-DEF_DIL_H_SCALE = 0.060   # horizontāli (nav aktīvs šajā versijā, atstāj kā ir)
-DEF_DIL_V_SCALE = 0.025   # vertikāli  (nav aktīvs šajā versijā, atstāj kā ir)
-DEF_EDGE_GUARD   = 9      # px
-DEF_FEATHER_PX   = 15
-DEF_A_MAX        = 148    # LAB A (nav izmantots šajā versijā)
-DEF_RED_H_LOW    = 12
-DEF_RED_H_HIGH   = 170
-DEF_RED_S_MIN    = 32
-DEF_L_DELTA      = -10
-DEF_B_DELTA      = +18
-DEF_MIN_TOOTH_CC = 80
-
-# Mutes maskas pastiepums
-MOUTH_DILATE_KX_SCALE = 0.003  # ↑ nedaudz platāk sānos, lai nezaudē molārus
-MOUTH_DILATE_KY_SCALE = 0.008  # ↓ mazāka vertikālā dilatācija (mazāk lien uz smaganām/lūpām)
+# ---------- Noklusētie TUNING (maskai) ----------
+MOUTH_DILATE_KX_SCALE = 0.003   # platāk uz sāniem (molāri)
+MOUTH_DILATE_KY_SCALE = 0.016   # vertikāli (mazāk = mazāk uz lūpām)
 MOUTH_DILATE_ITERS    = 1
-MOUTH_EDGE_GUARD      = 10     # ↑ lielāka atkāpe no lūpu malas (mazāk lūpu paķeršanas)
-MOUTH_FEATHER_PX      = 13
+MOUTH_EDGE_GUARD      = 6       # atkāpe no lūpas malas
+MOUTH_FEATHER_PX      = 15
 
-# Tumšā gaisma / dzeltenāki zobi
-ALLOW_DARKER_L   = 70
-ALLOW_YELLO_B    = 70
-SIDE_GROW_PX     = 55    # ↑ kompensē samazināto vertikāli, saglabā sānu zobus
-RED_SAT_MIN      = 100   # ↑ agresīvāk izmet sarkano (smaganas/lūpas) pēc HSV
-
-
-def _getf(name, default):
-    v = request.args.get(name)
-    if v is None: return float(default)
-    try: return float(v)
-    except: return float(default)
-
-def _geti(name, default):
-    v = request.args.get(name)
-    if v is None: return int(default)
-    try: return int(v)
-    except: return int(default)
+# Stabilitātei tumšās bildēs
+ALLOW_DARKER_L   = 60
+ALLOW_YELLO_B    = 60
+SIDE_GROW_PX     = 40
+RED_SAT_MIN      = 25
 
 def _landmarks_to_xy(landmarks, w, h, idx_list):
     pts = []
@@ -89,20 +61,17 @@ def _build_mouth_mask(img_bgr, landmarks):
     mask = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(mask, [inner], 255)
 
-    # anizotropa dilatācija ar TUNING parametriem
     side = max(1.0, math.sqrt(area))
     kx = max(3, int(side * MOUTH_DILATE_KX_SCALE)) | 1
     ky = max(3, int(side * MOUTH_DILATE_KY_SCALE)) | 1
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kx, ky))
     mask = cv2.dilate(mask, kernel, iterations=MOUTH_DILATE_ITERS)
 
-    # drošības josla no lūpu malas
     if MOUTH_EDGE_GUARD > 0:
         g = MOUTH_EDGE_GUARD
         guard_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (g*2+1, g*2+1))
         mask = cv2.erode(mask, guard_k, iterations=1)
 
-    # mīksta mala
     if MOUTH_FEATHER_PX > 0:
         f = MOUTH_FEATHER_PX | 1
         mask = cv2.GaussianBlur(mask, (f, f), 0)
@@ -110,18 +79,9 @@ def _build_mouth_mask(img_bgr, landmarks):
     return mask
 
 def _build_teeth_mask(img_bgr, mouth_mask):
-    """
-    Stabils zobu segums arī tumšākās bildēs:
-      - CLAHE tikai mutes zonai (caur pilna L ceļu)
-      - sliekšņi no procentīļiem
-      - atļaujam tumšākus/dzeltenākus zobus
-      - izmetam sarkanos (smaganas/lūpas)
-      - horizontāla “pastiepšana” uz sāniem
-    """
     if mouth_mask.sum() == 0:
         return np.zeros_like(mouth_mask)
 
-    h, w = mouth_mask.shape[:2]
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
     L, A, B = cv2.split(lab)
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
@@ -131,33 +91,30 @@ def _build_teeth_mask(img_bgr, mouth_mask):
     if not np.any(m):
         return np.zeros_like(mouth_mask)
 
-    # 1) CLAHE – APPLY UZ PILNĀ L (2D), PĒC TAM IEBLENDĒ MUTES ZONĀ
+    # CLAHE tikai mutes zonai
     L_full_eq = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(L)
     L_eq = L.copy()
     L_eq[m] = L_full_eq[m]
 
-    # 2) Dinamiski sliekšņi no procentīļiem mutes zonā
+    # Dinamiski sliekšņi (procentīļi) + pielaides
     Lp = np.percentile(L_eq[m], 55) if np.any(m) else 120
     Bp = np.percentile(B[m], 60)    if np.any(m) else 140
     L_thr = max(40, int(Lp) - ALLOW_DARKER_L)
     B_thr = min(210, int(Bp) + ALLOW_YELLO_B)
 
-    # 3) Sarkanais (smaganas/lūpas) pēc HSV
+    # Izmet sarkano (smaganas/lūpas) pēc HSV
     red_like = (((H <= 12) | (H >= 170)) & (S > RED_SAT_MIN))
 
-    # 4) Kandidāti
     raw = ((L_eq > L_thr) & (B < B_thr) & (~red_like) & m).astype(np.uint8) * 255
 
-    # drošības malas atkāpe no lūpas
+    # drošības josla no lūpas malas
     guard_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     inner_safe = cv2.erode(mouth_mask, guard_k, iterations=1)
     raw = cv2.bitwise_and(raw, inner_safe)
 
-    # morfoloģija
     raw = cv2.morphologyEx(raw, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), iterations=1)
     raw = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8), iterations=2)
 
-    # aizpildām caurumus
     cnts, _ = cv2.findContours(raw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     filled = np.zeros_like(raw)
     for c in cnts:
@@ -166,7 +123,7 @@ def _build_teeth_mask(img_bgr, mouth_mask):
 
     teeth = filled
 
-    # 5) Paplašinām horizontāli (uz sāniem), bet paliekam mutes zonā
+    # Paplašinām horizontāli (molāriem), bet paliekam mutes zonā
     if SIDE_GROW_PX > 0:
         kx = SIDE_GROW_PX * 2 + 1
         ky = 3
@@ -174,28 +131,24 @@ def _build_teeth_mask(img_bgr, mouth_mask):
         teeth = cv2.dilate(teeth, grow_k, iterations=1)
         teeth = cv2.bitwise_and(teeth, mouth_mask)
 
-    # mīksta mala
     teeth = cv2.GaussianBlur(teeth, (15, 15), 0)
     return teeth
 
-def _teeth_whiten(img_bgr):
-    _ = _geti("feather", DEF_FEATHER_PX)  # hook nākotnei
+# ---------- Balināšanas līmeņi ----------
+# Katram: (L_mult, L_add, B_mult, B_sub, A_towards_128, blend_alpha)
+LEVELS = {
+    "3":         (1.04,  6, 0.95, 1, 0.94, 0.75),  # 3 toņi
+    "5":         (1.06,  8, 0.92, 2, 0.92, 0.80),  # 5 toņi
+    "8":         (1.08, 10, 0.88, 3, 0.90, 0.85),  # 8 toņi
+    "hollywood": (1.12, 12, 0.82, 5, 0.88, 0.90),  # Holivudas smaids
+}
 
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    res = face_mesh.process(img_rgb)
-    if not res.multi_face_landmarks:
-        return img_bgr
+def _apply_whitening(img_bgr, teeth_mask, level_key):
+    # drošs defaults
+    if level_key not in LEVELS:
+        level_key = "5"
+    Lm, La, Bm, Bs, Acoef, alpha = LEVELS[level_key]
 
-    landmarks = res.multi_face_landmarks[0].landmark
-    mouth_mask = _build_mouth_mask(img_bgr, landmarks)
-    if mouth_mask.sum() == 0:
-        return img_bgr
-
-    teeth_mask = _build_teeth_mask(img_bgr, mouth_mask)
-    if np.sum(teeth_mask) == 0:
-        return img_bgr
-
-    # --- Natural white (mazāk “zils” un plastmasīgs) ---
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
     L, A, B = cv2.split(lab)
     m = teeth_mask > 0
@@ -204,27 +157,24 @@ def _teeth_whiten(img_bgr):
     Af = A.astype(np.float32)
     Bf = B.astype(np.float32)
 
-    # Gaišumu ceļam maigi
-    Lf[m] = np.clip(Lf[m] * 1.06 + 6, 0, 255)
-
-    # Dzeltenumu mazāk “izgriežam” (mazāks zilgums)
-    Bf[m] = np.clip(Bf[m] * 0.92 - 2, 0, 255)
-
-    # Nedaudz tuvāk neitralam (mazāk rozā/zilzaļo nobīžu)
-    Af[m] = np.clip(128 + (Af[m] - 128) * 0.90, 0, 255)
+    # Gaišums
+    Lf[m] = np.clip(Lf[m] * Lm + La, 0, 255)
+    # Dzeltenuma samazināšana (bez “zilas plastmasas”)
+    Bf[m] = np.clip(Bf[m] * Bm - Bs, 0, 255)
+    # Tuvāk neitralam (mazāk rozā/zilzaļais tonis)
+    Af[m] = np.clip(128 + (Af[m] - 128) * Acoef, 0, 255)
 
     out = cv2.merge([Lf.astype(np.uint8), Af.astype(np.uint8), Bf.astype(np.uint8)])
     out_bgr = cv2.cvtColor(out, cv2.COLOR_LAB2BGR)
 
-    # Maigs faktūras izlīdzinājums un dabiskāks blends
+    # Maigs faktūras izlīdzinājums + dabiskāka sajaukšana
     blur = cv2.bilateralFilter(out_bgr, d=7, sigmaColor=40, sigmaSpace=40)
-    alpha = (teeth_mask.astype(np.float32) / 255.0)[..., None]  # [H,W,1]
-    # 85% “jaunais”, 15% oriģinālais – dabiskākas nianses
-    out_bgr = (img_bgr * (1 - alpha*0.85) + blur * (alpha*0.85)).astype(np.uint8)
-
+    a = (teeth_mask.astype(np.float32) / 255.0)[..., None]  # [H,W,1]
+    out_bgr = (img_bgr * (1 - a * alpha) + blur * (a * alpha)).astype(np.uint8)
     return out_bgr
 
 def _read_image_from_request():
+    # pieņem 'file' VAI 'image'
     if 'file' in request.files:
         f = request.files['file']
     elif 'image' in request.files:
@@ -239,13 +189,36 @@ def _read_image_from_request():
     img = np.array(pil)[:, :, ::-1]  # RGB->BGR
     return img, None
 
+def _teeth_whiten(img_bgr, level_key="5"):
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    res = face_mesh.process(img_rgb)
+    if not res.multi_face_landmarks:
+        return img_bgr
+    landmarks = res.multi_face_landmarks[0].landmark
+
+    mouth_mask = _build_mouth_mask(img_bgr, landmarks)
+    if mouth_mask.sum() == 0:
+        return img_bgr
+
+    teeth_mask = _build_teeth_mask(img_bgr, mouth_mask)
+    if np.sum(teeth_mask) == 0:
+        return img_bgr
+
+    return _apply_whitening(img_bgr, teeth_mask, level_key)
+
 @app.route("/whiten", methods=["POST"])
 def whiten():
     try:
+        level = (request.form.get("level") or request.args.get("level") or "").lower()
+        if level not in LEVELS:
+            level = "5"  # defaults
+
         img_bgr, err = _read_image_from_request()
         if err:
             return jsonify({"error": err[0]}), err[1]
-        out_bgr = _teeth_whiten(img_bgr)
+
+        out_bgr = _teeth_whiten(img_bgr, level_key=level)
+
         out_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(out_rgb)
         buf = io.BytesIO()
@@ -253,7 +226,6 @@ def whiten():
         buf.seek(0)
         return send_file(buf, mimetype="image/jpeg")
     except Exception as e:
-        # palīdzēs ātri saprast, ja vēl kas nobrūk prodā
         return jsonify({"error": f"processing_failed: {type(e).__name__}: {e}",
                         "trace": traceback.format_exc()}), 500
 
