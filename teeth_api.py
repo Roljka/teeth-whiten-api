@@ -40,11 +40,11 @@ DEF_B_DELTA      = +18
 DEF_MIN_TOOTH_CC = 80
 
 # Mutes maskas pastiepums
-MOUTH_DILATE_KX_SCALE = 0.005  # ↑ nedaudz platāk sānos, lai nezaudē molārus
-MOUTH_DILATE_KY_SCALE = 0.010  # ↓ mazāka vertikālā dilatācija (mazāk lien uz smaganām/lūpām)
+MOUTH_DILATE_KX_SCALE = 0.003  # ↑ nedaudz platāk sānos, lai nezaudē molārus
+MOUTH_DILATE_KY_SCALE = 0.008  # ↓ mazāka vertikālā dilatācija (mazāk lien uz smaganām/lūpām)
 MOUTH_DILATE_ITERS    = 1
-MOUTH_EDGE_GUARD      = 9      # ↑ lielāka atkāpe no lūpu malas (mazāk lūpu paķeršanas)
-MOUTH_FEATHER_PX      = 15
+MOUTH_EDGE_GUARD      = 10      # ↑ lielāka atkāpe no lūpu malas (mazāk lūpu paķeršanas)
+MOUTH_FEATHER_PX      = 13
 
 # Tumšā gaisma / dzeltenāki zobi
 ALLOW_DARKER_L   = 70
