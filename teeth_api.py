@@ -199,21 +199,32 @@ def _teeth_whiten(img_bgr):
     if np.sum(teeth_mask) == 0:
         return img_bgr
 
-    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
-    L, A, B = cv2.split(lab)
-    m = teeth_mask > 0
+   # --- Natural white (mazāk “zils” un plastmasīgs) ---
+lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+L, A, B = cv2.split(lab)
+m = teeth_mask > 0
 
-    Lf = L.astype(np.float32)
-    Bf = B.astype(np.float32)
-    Lf[m] = np.clip(Lf[m] * 1.10 + 10, 0, 255)
-    Bf[m] = np.clip(Bf[m] * 0.84 - 6, 0, 255)
+Lf = L.astype(np.float32)
+Af = A.astype(np.float32)
+Bf = B.astype(np.float32)
 
-    out = cv2.merge([Lf.astype(np.uint8), A, Bf.astype(np.uint8)])
-    out_bgr = cv2.cvtColor(out, cv2.COLOR_LAB2BGR)
+# Gaišumu ceļam maigi
+Lf[m] = np.clip(Lf[m] * 1.06 + 6, 0, 255)
 
-    # viegls faktūras izlīdzinājums tikai zobu zonā
-    blur = cv2.bilateralFilter(out_bgr, d=7, sigmaColor=40, sigmaSpace=40)
-    out_bgr[m] = blur[m]
+# Dzeltenumu mazāk “izgriežam” (mazāks zilgums)
+Bf[m] = np.clip(Bf[m] * 0.92 - 2, 0, 255)
+
+# Nedaudz tuvāk neitralam (mazāk rozā/zilzaļo nobīžu)
+Af[m] = np.clip(128 + (Af[m] - 128) * 0.90, 0, 255)
+
+out = cv2.merge([Lf.astype(np.uint8), Af.astype(np.uint8), Bf.astype(np.uint8)])
+out_bgr = cv2.cvtColor(out, cv2.COLOR_LAB2BGR)
+
+# Maigs faktūras izlīdzinājums un dabiskāks blends
+blur = cv2.bilateralFilter(out_bgr, d=7, sigmaColor=40, sigmaSpace=40)
+alpha = (teeth_mask.astype(np.float32) / 255.0)[..., None]  # [H,W,1]
+# 85% “jaunais”, 15% oriģinālais – dabiskākas nianses
+out_bgr = (img_bgr * (1 - alpha*0.85) + blur * (alpha*0.85)).astype(np.uint8)
     return out_bgr
 
 def _read_image_from_request():
