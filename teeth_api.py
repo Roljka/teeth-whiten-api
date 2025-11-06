@@ -54,9 +54,9 @@ MOUTH_EDGE_GUARD      = 6       # atkāpe no lūpu malas
 MOUTH_FEATHER_PX      = 15
 
 # Tumšā gaisma / dzeltenāki zobi (stabilā versija)
-ALLOW_DARKER_L   = 60
-ALLOW_YELLO_B    = 60
-SIDE_GROW_PX     = 40
+ALLOW_DARKER_L   = 70
+ALLOW_YELLO_B    = 70
+SIDE_GROW_PX     = 50
 RED_SAT_MIN      = 25  # sarkanā piesātinājuma min (HSV), lai mazāk ķertu lūpas
 
 def _get_level_params():
