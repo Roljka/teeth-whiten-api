@@ -12,7 +12,7 @@ app = Flask(__name__)
 CORS(app)
 
 # ========= DEMO ATTĒLS (NEMAINI, JA VIETĀ) =========
-DEMO_IMAGE_URL = "https://woocommerce-181503-5955573.cloudwaysapps.com/wp-content/uploads/2025/11/sieviete-ar-dzelteniem-zobiem.webp"
+DEMO_IMAGE_URL = "https://pielaikosmaidu.lv/wp-content/uploads/2025/11/sieviete-ar-dzelteniem-zobiem.webp"
 
 # ========= BALINĀŠANAS LĪMEŅI (KĀ Bija “labajā” versijā, + skalēti) =========
 # Apraksts:
